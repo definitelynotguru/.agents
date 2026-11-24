@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+"""Run one check attached, mirror every byte to a bounded log, forward signals."""
+
+from __future__ import annotations
+
+import ctypes
+import fcntl
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, Callable
+
+LOG_RETENTION_SECONDS = 24 * 60 * 60
+READ_SIZE = 64 * 1024
+TERMINATION_GRACE_SECONDS = 1.0
+LOCK_POLL_SECONDS = 2.0
+GIB = 1024**3
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def _cgroup_limit_files() -> list[Path]:
+    """The memory limit file of this process's cgroup and of each ancestor.
+
+    The kernel kills at the tightest of them, which is usually not the root's:
+    Droid runs commands in a nested tools cgroup below the machine's memory.
+    """
+    try:
+        entries = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        return []
+    files: list[Path] = []
+    for entry in entries:
+        _hierarchy, controllers, path = entry.split(":", 2)
+        if not controllers:
+            base, name = CGROUP_ROOT, "memory.max"
+        elif "memory" in controllers.split(","):
+            base, name = CGROUP_ROOT / "memory", "memory.limit_in_bytes"
+        else:
+            continue
+        leaf = base / path.lstrip("/")
+        files += [d / name for d in (leaf, *leaf.parents) if d.is_relative_to(base)]
+    return files
+
+
+def _check_memory() -> int:
+    """Bytes the checks share: the tightest cgroup limit over this process, else the host's."""
+    limits = [os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")]
+    for path in _cgroup_limit_files():
+        try:
+            limit = path.read_text().strip()
+        except OSError:
+            continue
+        # cgroup v2 writes "max" when unset; v1 writes a number past any host.
+        if limit.isdigit():
+            limits.append(int(limit))
+    return min(limits)
+
+
+def _exclusive_slots(memory: int) -> int:
+    # A type-aware lint of one package alone can take 5-6 GiB.
+    return 1 if memory < 12 * GIB else 2
+
+
+EXCLUSIVE_SLOTS = _exclusive_slots(_check_memory())
+_EXCLUSIVE_LOCK_BASE = os.environ.get(
+    "DROID_CHECK_LOCK_PATH", f"/tmp/droid-checks-{os.getuid()}.exclusive.lock"
+)
+EXCLUSIVE_LOCK_PATHS = tuple(
+    Path(f"{_EXCLUSIVE_LOCK_BASE}.{slot}") for slot in range(EXCLUSIVE_SLOTS)
+)
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Inherited credentials never reach a check: a test that prints its environment
+# (an assertion diff, a snapshot) would otherwise put them in its transcript.
+# Matched on the upper-cased name only; a secret inside another value, such as
+# a password in DATABASE_URL, passes.
+_CREDENTIAL_RE = re.compile(r"^(?:CONJURE|JFROG)_|(?:TOKEN|SECRET|PASSWORD|PASSWD)$|_KEY$")
+_NPX_YES = "NPM_CONFIG_YES"
+# Factory's environment directories. A login shell (/etc/profile.d/droid-env.sh)
+# and the gh wrapper source the files in them, which would undo the strip above.
+# A check sees each one as an empty directory, never a cover over its files: the
+# machine's refresh replaces /etc/droid/environment by rename, which detaches a
+# mount over the file, and writes new copies beside it while a check runs.
+_FACTORY_DIRS = (Path("/etc/droid"),)
+_SCM_DIR = Path(".config", "factory", "scm")
+_MS_RDONLY, _MS_NOSUID, _MS_NODEV, _MS_NOEXEC = 0x1, 0x2, 0x4, 0x8
+_MS_REC, _MS_PRIVATE = 0x4000, 0x40000
+_EMPTY_FLAGS = _MS_RDONLY | _MS_NOSUID | _MS_NODEV | _MS_NOEXEC
+_SLUG_RE = re.compile(r"[^a-z0-9._-]+")
+_TEST_FILE_RE = re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$")
+_FAST_FORMATTERS = frozenset({"oxfmt"})
+_MAX_LIGHT_TEST_FILES = 4
+
+
+@dataclass(frozen=True, slots=True)
+class Options:
+    label: str
+    cwd: str | None
+    env: dict[str, str]
+    unset_prefixes: tuple[str, ...]
+    keep: frozenset[str]
+    exclusive: bool
+    command: list[str]
+
+
+def _read_env_file(path: str) -> dict[str, str]:
+    """Load KEY=VALUE pairs from a JSON object or dotenv file.
+
+    Errors name the file, the line or entry, and the reason, never the text: a
+    malformed line is as likely to be a pasted secret as a name.
+    """
+    try:
+        text = Path(path).expanduser().read_text()
+    except UnicodeDecodeError as exc:
+        raise OSError(f"{path}: not UTF-8 text ({exc.reason})") from exc
+    loaded: dict[str, str] = {}
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            entries = json.loads(stripped)
+        except ValueError as exc:
+            raise OSError(f"{path}: invalid JSON ({exc})") from exc
+        for number, (name, value) in enumerate(entries.items(), 1):
+            if not isinstance(value, str) or _ENV_NAME_RE.fullmatch(name) is None:
+                raise OSError(f"{path}: entry {number} is not a string environment entry")
+            loaded[name] = _env_value(value, f"{path}: entry {number}")
+        return loaded
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        if "=" not in line:
+            raise OSError(f"{path}: line {number}: expected KEY=VALUE")
+        name, value = line.split("=", 1)
+        if _ENV_NAME_RE.fullmatch(name) is None:
+            raise OSError(f"{path}: line {number}: invalid environment name")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        loaded[name] = _env_value(value, f"{path}: line {number}")
+    return loaded
+
+
+def _env_value(value: str, where: str) -> str:
+    """A value the child's environment can hold; otherwise Popen fails with a bare traceback."""
+    try:
+        encoded = os.fsencode(value)
+    except UnicodeEncodeError:
+        raise OSError(f"{where}: value is not encodable text") from None
+    if b"\0" in encoded:
+        raise OSError(f"{where}: value holds a NUL byte")
+    return value
+
+
+def _is_credential(name: str) -> bool:
+    return _CREDENTIAL_RE.search(name.upper().rstrip("_")) is not None
+
+
+def _child_env(
+    options: Options, inherited: dict[str, str]
+) -> tuple[dict[str, str], list[str]]:
+    """The check's environment, and the inherited credentials it does not receive.
+
+    Explicit `--env` and `--env-file` entries apply last, so a check that needs a
+    credential names it there or keeps the inherited one with `--keep-env`. A
+    keep that would keep nothing is refused with ValueError.
+
+    Every check gets `NPM_CONFIG_YES=false` unless it names that setting itself:
+    with no terminal to ask on, npx otherwise installs and runs whatever the
+    registry holds under a bin name the checkout does not have.
+    """
+    for name in sorted(options.keep):
+        if name not in inherited:
+            raise ValueError(f"--keep-env {name}: not in the inherited environment")
+        if name.startswith(options.unset_prefixes):
+            raise ValueError(f"--keep-env {name}: an --unset-prefix also drops it")
+    env: dict[str, str] = {}
+    stripped: list[str] = []
+    for name, value in inherited.items():
+        if name.startswith(options.unset_prefixes):
+            continue
+        if _is_credential(name) and name not in options.keep:
+            if name not in options.env:
+                stripped.append(name)
+            continue
+        env[name] = value
+    # npm reads this name in any case, so an inherited spelling would compete with the default.
+    env = {name: value for name, value in env.items() if name.upper() != _NPX_YES}
+    if not any(name.upper() == _NPX_YES for name in options.env):
+        env[_NPX_YES] = "false"
+    env.update(options.env)
+    return env, sorted(stripped)
+
+
+def _render_names(names: list[str]) -> str:
+    """Names safe to print: a newline or a non-UTF-8 byte in a name is counted, not shown."""
+    shown = [name for name in names if _ENV_NAME_RE.fullmatch(name)]
+    hidden = len(names) - len(shown)
+    if hidden:
+        shown.append(
+            "and 1 name that is not a shell identifier"
+            if hidden == 1
+            else f"and {hidden} names that are not shell identifiers"
+        )
+    return ", ".join(shown)
+
+
+def _env_dirs(env: dict[str, str], cwd: str | None) -> tuple[Path, ...]:
+    """Factory's environment directories that exist, for a child given `env` in `cwd`.
+
+    The SCM directory is covered under run-check's home, where the real file is,
+    and under the child's HOME, which its login shell reads. A relative HOME is the
+    child's, so it resolves against `cwd`, where the child starts.
+    """
+    if sys.platform != "linux":
+        return ()
+    homes = (Path.home(), Path(cwd or ".").absolute() / env.get("HOME", Path.home()))
+    candidates = (*_FACTORY_DIRS, *(home / _SCM_DIR for home in homes))
+    return tuple(dict.fromkeys(path for path in candidates if path.is_dir()))
+
+
+def _hide(paths: tuple[Path, ...]) -> Callable[[], None] | None:
+    """A pre-exec step that shows the child alone each of `paths` as an empty, read-only tmpfs.
+
+    The child gets its own user namespace, which maps only the caller's uid and
+    gid, and its own mount namespace. It stays unprivileged, nobody else's view
+    changes, and it cannot read run-check's /proc/<pid>/environ either.
+    """
+    if not paths:
+        return None
+    uid, gid = os.getuid(), os.getgid()
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def hide() -> None:
+        os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS)
+        for name, value in (
+            ("setgroups", "deny"),
+            ("uid_map", f"{uid} {uid} 1"),
+            ("gid_map", f"{gid} {gid} 1"),
+        ):
+            Path("/proc/self", name).write_text(value)
+        mounts = [(None, b"/", None, _MS_REC | _MS_PRIVATE, None)]
+        mounts += [
+            (b"tmpfs", os.fsencode(path), b"tmpfs", _EMPTY_FLAGS, b"mode=0555")
+            for path in paths
+        ]
+        for source, target, fstype, flags, data in mounts:
+            if libc.mount(source, target, fstype, flags, data) != 0:
+                raise OSError(ctypes.get_errno(), os.fsdecode(target))
+
+    return hide
+
+
+def _error_status(exc: OSError) -> int:
+    return 127 if isinstance(exc, FileNotFoundError) else 1
+
+
+def _refuse(message: str) -> None:
+    print(f"[run-check] error: {message}", file=sys.stderr)
+    raise SystemExit(64)
+
+
+def _usage() -> None:
+    print(
+        "usage: run-check <label> [--cwd <directory>] "
+        "[--env KEY=VALUE]... [--env-file <path>]... [--unset-prefix <prefix>]... "
+        "[--keep-env <NAME>]... [--exclusive] -- <command> [args...]",
+        file=sys.stderr,
+    )
+    raise SystemExit(64)
+
+
+def _parse(argv: list[str]) -> Options:
+    if len(argv) < 3:
+        _usage()
+
+    label = argv[0]
+    cwd: str | None = None
+    env: dict[str, str] = {}
+    unset_prefixes: list[str] = []
+    keep: set[str] = set()
+    exclusive = False
+    index = 1
+
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            command = argv[index + 1 :]
+            if not command:
+                _usage()
+            return Options(
+                label, cwd, env, tuple(unset_prefixes), frozenset(keep), exclusive, command
+            )
+        if token == "--env-file":
+            if index + 1 >= len(argv):
+                _usage()
+            try:
+                env.update(_read_env_file(argv[index + 1]))
+            except OSError as exc:
+                print(f"[run-check] error: {exc}", file=sys.stderr)
+                raise SystemExit(_error_status(exc)) from exc
+            index += 2
+            continue
+        if token == "--unset-prefix":
+            if index + 1 >= len(argv) or not argv[index + 1]:
+                _usage()
+            unset_prefixes.append(argv[index + 1])
+            index += 2
+            continue
+        if token == "--keep-env":
+            if index + 1 >= len(argv) or _ENV_NAME_RE.fullmatch(argv[index + 1]) is None:
+                _refuse("--keep-env takes one variable name")
+            if not _is_credential(argv[index + 1]):
+                _refuse(f"--keep-env {argv[index + 1]}: run-check never strips this name")
+            keep.add(argv[index + 1])
+            index += 2
+            continue
+        if token == "--exclusive":
+            exclusive = True
+            index += 1
+            continue
+        if token == "--cwd":
+            if index + 1 >= len(argv):
+                _usage()
+            cwd = argv[index + 1]
+            index += 2
+            continue
+        if token == "--env":
+            if index + 1 >= len(argv) or "=" not in argv[index + 1]:
+                _usage()
+            name, value = argv[index + 1].split("=", 1)
+            if _ENV_NAME_RE.fullmatch(name) is None:
+                _usage()
+            env[name] = value
+            index += 2
+            continue
+        _usage()
+    _usage()
+
+
+def _log_dir() -> Path:
+    path = Path(os.environ.get("DROID_CHECK_LOG_DIR", "/tmp/droid-checks"))
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return path
+
+
+def _prune_logs(log_dir: Path) -> None:
+    """Delete each log once it is older than the retention window.
+
+    Age is the only rule: a count shared by every label and session on the
+    host deletes a log a review still cites as soon as others run 50 checks.
+    """
+    cutoff = time.time() - LOG_RETENTION_SECONDS
+    for path in log_dir.glob("*.log"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _create_log(log_dir: Path, label: str) -> tuple[Path, object]:
+    slug = _SLUG_RE.sub("-", label.lower()).strip("-") or "check"
+    with (log_dir / ".lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f"{slug}.",
+            suffix=".log",
+            dir=log_dir,
+        )
+        _prune_logs(log_dir)
+    return Path(raw_path), os.fdopen(descriptor, "wb", buffering=0)
+
+
+def _is_light(command: list[str]) -> bool:
+    """A few named vitest files or a formatter skip the host's heavy-check slots.
+
+    Anything unrecognized stays heavy: Oxlint runs tsgolint under a type-aware
+    config, which holds 2 GB on two files and outgrows a 6.5 GB cgroup on a
+    whole package, package
+    scripts and turbo runs can fan out to whole suites or builds, and benches
+    and E2E runs need a quiet host. The file cap bounds vitest
+    workers (one per file) so concurrent light checks cannot exhaust RAM.
+    """
+    if any(word in token for token in command for word in ("bench", "e2e", "typecheck")):
+        return False
+    names = {Path(token).name for token in command}
+    if names & _FAST_FORMATTERS:
+        return True
+    test_files = sum(1 for token in command if _TEST_FILE_RE.search(token))
+    return "vitest" in names and 0 < test_files <= _MAX_LIGHT_TEST_FILES
+
+
+def _lock_holder(lock: BinaryIO) -> dict[str, object] | None:
+    """The holder's own record from the lock file, or None if it wrote none."""
+    lock.seek(0)
+    try:
+        holder = json.loads(lock.read())
+    except ValueError:
+        return None
+    return holder if isinstance(holder, dict) else None
+
+
+def _describe_holder(holder: dict[str, object] | None) -> str:
+    if holder is None:
+        return "another check"
+    elapsed = int(time.time() - float(holder.get("started", time.time())))
+    where = Path(str(holder.get("cwd", ""))).name or "?"
+    return (
+        f"{holder.get('label', '?')} ({where}, pid {holder.get('pid', '?')}, "
+        f"running {elapsed // 60}m{elapsed % 60:02d}s)"
+    )
+
+
+def _try_slots(slots: list[BinaryIO]) -> BinaryIO | None:
+    for slot in slots:
+        try:
+            fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            continue
+        return slot
+    return None
+
+
+def _acquire_exclusive(options: Options, emit: Callable[[str], None]) -> BinaryIO:
+    """Queue for a host slot, naming the checks ahead each time they change.
+
+    Holders record themselves in their slot file so waiters can show who they
+    are behind; a blocking flock would look identical to a hang.
+    """
+    waited_since = time.monotonic()
+    shown: list[tuple[object, object]] | None = None
+    slots = [path.open("a+b") for path in EXCLUSIVE_LOCK_PATHS]
+    lock: BinaryIO | None = None
+    try:
+        while (lock := _try_slots(slots)) is None:
+            holders = [_lock_holder(slot) for slot in slots]
+            keys = [((h or {}).get("pid"), (h or {}).get("label")) for h in holders]
+            if keys != shown:
+                ahead = "; ".join(_describe_holder(h) for h in holders)
+                emit(f"[run-check] exclusive: waiting behind {ahead}\n")
+                shown = keys
+            time.sleep(LOCK_POLL_SECONDS)
+    finally:
+        for slot in slots:
+            if slot is not lock:
+                slot.close()
+    waited = int(time.monotonic() - waited_since)
+    lock.truncate(0)
+    lock.write(
+        json.dumps(
+            {
+                "label": options.label,
+                "cwd": options.cwd or os.getcwd(),
+                "pid": os.getpid(),
+                "started": time.time(),
+            }
+        ).encode()
+    )
+    lock.flush()
+    emit(f"[run-check] exclusive: acquired after {waited // 60}m{waited % 60:02d}s\n")
+    return lock
+
+
+def _status(returncode: int) -> int:
+    return 128 + -returncode if returncode < 0 else returncode
+
+
+def _terminate_group(child: subprocess.Popen[bytes], signum: int) -> None:
+    try:
+        os.killpg(child.pid, signum)
+    except ProcessLookupError:
+        return
+
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        child.poll()
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _write(stream: object, log: object, data: bytes) -> None:
+    stream.write(data)
+    stream.flush()
+    log.write(data)
+
+
+def _nearest_nvmrc(cwd: str | None) -> Path | None:
+    directory = Path(cwd or os.getcwd()).resolve()
+    for candidate in (directory, *directory.parents):
+        nvmrc = candidate / ".nvmrc"
+        if nvmrc.is_file():
+            return nvmrc
+    return None
+
+
+def _node_command(
+    command: list[str],
+    cwd: str | None,
+    env: dict[str, str],
+) -> tuple[list[str], str | None]:
+    nvmrc = _nearest_nvmrc(cwd)
+    if nvmrc is None:
+        return command, None
+
+    nvm_dir = Path(env.get("NVM_DIR", str(Path.home() / ".nvm"))).expanduser()
+    nvm_exec = nvm_dir / "nvm-exec"
+    if not nvm_exec.is_file():
+        raise FileNotFoundError(
+            f"{nvmrc} requires NVM, but {nvm_exec} does not exist; "
+            f"install NVM, run `nvm install` in {nvmrc.parent}, then rerun this check"
+        )
+
+    selector = nvmrc.read_text().strip()
+    if not selector:
+        raise OSError(f"{nvmrc} is empty")
+
+    env["NODE_VERSION"] = selector
+    return [
+        str(nvm_exec),
+        "env",
+        "-u",
+        "NODE_VERSION",
+        *command,
+    ], f"{selector} ({nvmrc})"
+
+
+def _run(options: Options, env: dict[str, str], stripped: list[str]) -> int:
+    log_dir = _log_dir()
+    log_path, log = _create_log(log_dir, options.label)
+    stdout = sys.stdout.buffer
+
+    def emit(message: str) -> None:
+        _write(stdout, log, message.encode())
+
+    emit(f"[run-check] log: {log_path}\n")
+
+    if stripped:
+        emit(f"[run-check] env: not passed: {_render_names(stripped)}\n")
+    child: subprocess.Popen[bytes] | None = None
+    received_signal: int | None = None
+
+    def forward(signum: int, _frame: object) -> None:
+        nonlocal received_signal
+        received_signal = signum
+        if child is None:
+            raise InterruptedError("check interrupted before validator startup")
+        _terminate_group(child, signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
+
+    lock: BinaryIO | None = None
+    try:
+        if options.exclusive and _is_light(options.command):
+            emit("[run-check] exclusive: skipped (targeted tests or formatter)\n")
+        elif options.exclusive:
+            lock = _acquire_exclusive(options, emit)
+        command, node_version = _node_command(
+            options.command,
+            options.cwd,
+            env,
+        )
+        if node_version is not None:
+            emit(f"[run-check] node: {node_version}\n")
+        hidden = _env_dirs(env, options.cwd)
+        if hidden:
+            emit(f"[run-check] env: hidden {', '.join(map(str, hidden))}\n")
+        child = subprocess.Popen(
+            command,
+            cwd=options.cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            preexec_fn=_hide(hidden),
+        )
+        assert child.stdout is not None
+        while chunk := os.read(child.stdout.fileno(), READ_SIZE):
+            _write(stdout, log, chunk)
+        returncode = child.wait()
+        status = (
+            128 + received_signal
+            if received_signal is not None
+            else _status(returncode)
+        )
+    except InterruptedError:
+        if received_signal is None:
+            raise
+        status = 128 + received_signal
+    except OSError as exc:
+        emit(f"[run-check] error: {exc}\n")
+        status = _error_status(exc)
+    except subprocess.SubprocessError:
+        # Popen reports a failed pre-exec step without its reason.
+        emit(
+            "[run-check] error: the check did not start: covering "
+            f"{', '.join(map(str, hidden))} in a new user and mount namespace failed\n"
+        )
+        status = 1
+    finally:
+        if child is not None:
+            if child.stdout is not None:
+                child.stdout.close()
+            if child.poll() is None:
+                _terminate_group(child, signal.SIGTERM)
+                child.wait()
+        if lock is not None:
+            lock.truncate(0)
+            lock.close()
+    emit(f"[run-check] exit: {status}\n")
+    log.close()
+    return status
+
+
+def main() -> int:
+    options = _parse(sys.argv[1:])
+    try:
+        env, stripped = _child_env(options, dict(os.environ))
+    except ValueError as exc:
+        _refuse(str(exc))
+    return _run(options, env, stripped)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

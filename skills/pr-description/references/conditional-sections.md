@@ -1,0 +1,256 @@
+# Conditional sections
+
+Templates for `workflow.md`'s conditional catalog. Use only the sections whose
+trigger fired. Each section owns detail and methodology, not exclusive first
+mention: preview any fact that changes the merge decision in Description.
+
+## Inline to the Description
+
+### Anti-goals — scope deliberately constrained
+
+One-liner under Description; pre-empts drive-by "while you're here…" comments. Stack multiples as sub-bullets. If *every* PR has anti-goals, the scope was never honest. An anti-goal is a separate change this PR deliberately does not make, never a known defect in code it touches: fix that here, or name the decision it needs in the Description.
+
+```markdown
+**Out of scope**: moving the remaining `auth/` callers to the new session API — a separate migration with its own rollout; none of those callers is broken today.
+```
+
+### Before → After table — one rule across three or more surfaces, or three or more behaviors changed at once
+
+When a reviewer could ask "and what happens to X now?" for several X, prose answers one X per paragraph and the reviewer assembles the picture; a table answers all of them in a minute. Grammar and fidelity rules: `show-me` `references/representations.md`, Policy before/after table. This file owns placement and ownership:
+
+- Directly under **What**, after the sentence that states the rule's before and after, before the composition table (large diff).
+- Verify every After cell against the diff, not the design note; the row that drifted is the one a reviewer will test.
+- The table owns those facts. Risk & Impact and any removed-safeguards list keep only what it cannot carry (member lists, deleted files and exports, dead branches, a Not-removed line); Verification points at it and adds `verified @` anchors; the commit table's "what changes" column stays one line per commit.
+
+### Diff composition — large diffs (roughly 1k+ lines or 20+ files)
+
+The reviewer's first question on a large diff is not "why merge?" but "how much of this must I actually read?" Unanswered, it rejects the PR on size alone. Answer it on the first screen, directly under **What**, with two computed tables: the composition table (what to read, per bucket) and the core table (what each behavior change does and what to check).
+
+Compute, never estimate:
+
+```bash
+python3 ~/.agents/skills/pr-description/scripts/diff-composition.py \
+  "origin/$DEFAULT_BRANCH" HEAD \
+  --core <every file that carries behavior> \
+  --tooling <harness/script prefixes not shipped>
+```
+
+```markdown
+**Where the change is.** +23,250 / −3,586 across 168 files. The review is 2,301 added lines in 14 core files; <one clause naming what the rest is>.
+
+| Bucket | + | − | Files | What it is | What to do with it |
+| --- | ---: | ---: | ---: | --- | --- |
+| **Core logic** | **2,301** | 637 | 14 | <the four nouns> | **This is the review.** Read the +2,301; check that the −637 removes only what the PR says. Breakdown below. |
+| Tests | 3,402 | 369 | 52 | 10 new suites, 42 modified | Read the +3,402 for the invariants under Verification. |
+| Mechanical | 2,410 | 2,244 | 87 | <the one repeated pattern>; ~750 lines are file moves (`a.ts` → `b.ts`); 56 files change 30 lines or fewer | Read two owners in full, spot-check the rest. |
+| Generated | 14,077 | 0 | 3 | `__ast-snapshots__/*.ast.json` | Skip. CI verifies they match the source. |
+| Tooling | 1,060 | 336 | 12 | Perf harness (`perf-engine/`, `scripts/`); not shipped | Skim. |
+
+**Core logic, by change:**
+
+| Change | + | − | Files | What it does | What to check |
+| --- | ---: | ---: | --- | --- | --- |
+| **New:** <change> | **640** | 355 | `bootstrap.ts` (+429, new file), `run.ts` (+211/−355, reshaped in six hunks) | <one sentence of behavior> | <the one thing to verify, e.g. every entry path now goes through bootstrap> |
+| **Deleted:** <change> | 0 | 189 | `legacy-loader.ts` (−189, whole file) | <what stops existing> | <over-reach check, e.g. no caller still imports it> |
+| **Swapped:** <change> | 1,661 | 93 | … | … | … |
+```
+
+Counting and grammar rules: `show-me` `references/representations.md`, Breakdown. This file owns the buckets, the reviewer actions, and placement:
+
+- Core logic first with its + in bold, then tests, mechanical, and the skip-only buckets (generated, tooling, docs) last.
+- Every row ends in a reviewer action: Skip / Skim / Spot-check / Read / This is the review.
+- The `--core` list is the honesty check: any file in "mechanical" that changes behavior (a fail-closed branch, a policy seal) moves to core, even at 235 lines.
+- The core table replaces any freeform list: one row per change, labeled **New**, **Deleted**, **Swapped**, or **Reshaped** (same behavior, restructured), so the reviewer knows whether to read closely or check for over-reach. Name each row's files with their own +/−, marking whole-file adds and deletes (the script flags them) and reshapes with their hunk count. Close with one sentence of behavior and one concrete thing to check. Four rows is typical; more than six means the PR needs `split-pr`.
+- Per-file counts appear only in the core table; the composition table stays at bucket level.
+- Prose about size ("the diff is mostly mechanical, read honestly…") is not a substitute. A paragraph reads as an excuse; a table with actions reads as a plan. Do not put the tables in Reviewer Guide: by then the reviewer has already decided.
+
+### Scope map — multi-concern diffs that are not large
+
+When a reviewer could ask "why are unrelated changes bundled?" and the diff is small enough that size is not the anxiety, append a scope map to the Description: one bullet per bucket (what it covers + why it must ship here), then an explicit Out-of-scope line. Bullets beat a table when each "why" is a sentence. Typical buckets: core change · plumbing it requires · deliberate behavior changes (cross-link the Reviewer Guide list) · tests/e2e · target-branch merge alignment ("no behavior of its own"). Never include both a scope map and a diff composition table; the composition table's "What it is" column carries the why.
+
+```markdown
+### Scope map — what is bundled and why
+- **<bucket>** — <files/areas>. <why the core change requires it.>
+**Out of scope:** <separate change this PR deliberately does not make + why it is separate; never a known defect in touched code.>
+```
+
+### Root Cause Analysis — bug fixes
+
+```markdown
+<details><summary>Root Cause Analysis</summary>
+
+**Trace**: <repro, symptoms, investigation; cite Sentry IDs / log queries pulled>
+**Root cause**: <first unintended side effect — not the downstream error; name the broken invariant>
+**Fix path**: <why this addresses the cause not the symptom; the rejected symptom-level fix>
+**Why this layer**: <if the fix isn't at the symptom's layer, justify; cite root-cause-analysis if it shaped the call>
+
+</details>
+```
+
+## Between Risk & Impact and Verification
+
+### Contract Delta — DB / API / type contract touched
+
+Drop rows that don't apply; each states the change + its backward-compat consequence.
+
+```markdown
+## Contract Delta
+**API**: <endpoint/method change; compat note>
+**DB**: <table/column/index change; migration safety>
+**Types/SDK**: <type/symbol change; consumer compat>
+```
+
+### Migration & Rollout — flag / migration / breaking change
+
+```markdown
+## Migration & Rollout
+**Order**: deploy (dark) -> run `2026_05_18_add_redirected_to.sql` -> flag `cart.redirect_v2` 10%->100% staging -> verify -> 10->100% prod over 24h.
+**Rollback**: flag flip suffices to 100%; migration is additive.
+**Coordination**: frontend `pr-1234` merges first so the field is consumed before it's populated.
+```
+
+### Performance Evidence — perf-sensitive changes
+
+Description previews the decision-relevant outcome. This section proves it:
+state workload, baseline, result, conditions, and rerun command. Numbers without
+methodology are theatre.
+
+```markdown
+## Performance Evidence
+**Benchmark**: 10k `/checkout`, 100 concurrent, warm cart (~500 items).
+**Before** (`main` @ abc1234): p50 42 / p95 81 / p99 134 ms.
+**After** (this PR): p50 18 / p95 31 / p99 58 ms.
+**Conditions**: c6a.2xlarge, Node 22.4. Rerun: `pnpm bench:checkout`.
+```
+
+### Telemetry & Observability — metric / log / trace changes
+
+```markdown
+## Telemetry & Observability
+**New**: <metric + type (counter/histogram/gauge); what it measures>
+**Changed**: <metric + tag; impact on dashboards/alerts that filter on it>
+**Logs**: <field + level + when emitted>
+**Alerts**: <existing-alert impact + new-alert candidate>
+```
+
+### Reverse Dependencies — >3 consumers of the changed surface
+
+✓ = verified (reviewer can stop); ⚠ = owner to ping.
+
+```markdown
+## Reverse Dependencies
+**Surface**: `@scope/sdk` `CheckoutClient.complete()` — added optional `onRedirect`.
+**Consumers** (via `rg "CheckoutClient" -t ts`):
+- ✓ `apps/web` — wired here
+- ✓ `services/order-worker` — ignores callback (server context)
+- ⚠ `apps/admin` — @bob, unverified; optional callback preserves compat by type
+```
+
+### Side Effects — acknowledged regression
+
+Honest acknowledgment beats discovery six weeks later. No regression → omit; don't fabricate.
+
+```markdown
+## Side Effects
+- Empty-cart users see a ~50ms flash before redirect (was an immediate 500). Acceptable per @alice (200ms threshold).
+- `cart_events` grows ~1 row/checkout. Est. +0.5% table storage / 90d.
+```
+
+## Below Description
+
+### Repro Recipe — new feature / fixed bug
+
+**Manual, human-run steps**: `setup -> action -> observed result`, each line something a reviewer *types or clicks* by hand, closing on a result they can eyeball. Bar: someone who's never touched the repo runs it as-is and sees the behavior. Indented (not fenced) block so it nests cleanly.
+
+Make the happy path **copy-pasteable**. Prefer exact prompts, commands, URLs, fixture values, and clicks over meta-prompts like "create an example resource" or "try the new flow." If a reviewer should type a prompt, include the prompt text. If they should use a fixture, name the fixture. Meta-prompts are allowed only after at least one concrete example, when you expect reviewers to try variations.
+
+Resolve every placeholder in the recipe. If a step needs an ID, generated filename, session slug, or other runtime value, include the command/UI action that reveals it before the step that uses it. Never assume reviewer context about where an identifier comes from; write the retrieval mechanism inline.
+
+**Synthesize required state inline — the sandbox pattern.** When the repro needs config, fixtures, or environment (a settings file, a hook, a seeded dir), the recipe *builds* them instead of instructing the reviewer to edit their own setup: `mktemp -d` for a scratch workspace, heredocs writing the exact config/fixture files, env vars or flags pointing the tool at the sandbox, then the one launch command that exhibits the behavior. The whole block is a single paste that runs from any checkout and leaves the reviewer's repo, settings, and home dir untouched — "edit your settings.json to add…" is a recipe smell; write the heredoc that creates a throwaway one instead.
+
+    REPO=$(git rev-parse --show-toplevel)
+    SCRATCH=$(mktemp -d)
+    mkdir -p "$SCRATCH/.factory"
+    cat > "$SCRATCH/.factory/settings.json" <<'JSON'
+    { "hooks": { "PreToolUse": [{ "matcher": "Execute",
+      "hooks": [{ "type": "command", "command": "sleep 95", "timeout": 120 }] }] } }
+    JSON
+    DROID_DEV_REPO_ROOT="$REPO" droid-dev --cwd "$SCRATCH" --auto high
+    # Run any command -> hook stalls 95s -> expect: no client-side timeout at 90s
+
+```markdown
+## Repro Recipe
+
+    pnpm dev
+    # /cart -> add 2 items -> checkout while logged out
+    # Expect: 302 -> /login?return_to=%2Fcheckout
+```
+
+**A test-runner command is not a repro recipe.** `pnpm test apps/web/e2e/checkout-redirect.spec.ts` reproduces nothing the reviewer doesn't already get from CI, which runs it on every push — pasting it as the recipe is dead weight, and it's the single most common failure here. Write the by-hand steps. If the change genuinely has no manual surface to exercise, drop this section rather than fake a recipe with a suite command — the automated coverage already has one home, Verification -> Regression coverage (with the `Sentinel test:` marker for the exact spec), not here.
+
+## Bottom of body (`<details>`)
+
+### Implementation map — large multi-subsystem diff (~20+ files)
+
+A reviewer-facing file tour — distinct from Implementation Notes, which records *decisions*. Group the diff into subsystems; per group, name the files and one line on what changed + why it's grouped there. Complements the Reviewer Guide's read-order (the critical path) by giving the *complete* inventory so any file is locatable. Lead with the live diffstat.
+
+```markdown
+<details><summary>Implementation map</summary>
+
+Current diff: `52 files changed, +3418 / -1650`.
+- **<subsystem>**: `path/a.ts`, `path/b.tsx` — <what changed + why grouped here>
+- **<subsystem>**: `path/c.ts` — <…>
+
+</details>
+```
+
+### Implementation Notes — `.agents/specs/<spec>.notes.md` exists
+
+The `/implement` hook scaffolds this on spec approval. Ingest, then thread entries back into the always-on sections so they're not siloed: `deviation` → Description, `tradeoff` → Risk & Impact, `surprise` → Verification (Behavior verified), `open-decision` → Description (the decision the reviewer or author must make).
+
+```bash
+TICKET=$(linear context --output json 2>/dev/null | jq -r '.identifier // empty' | tr '[:upper:]' '[:lower:]')
+NOTES=$(ls .agents/specs/*.notes.md 2>/dev/null | rg -i "$TICKET" | head -1); [ -n "$NOTES" ] && cat "$NOTES"
+```
+
+```markdown
+<details><summary>Implementation Notes</summary>
+
+Source: `.agents/specs/<basename>.notes.md`
+**Deviations from spec**: <one per `Type: deviation`>
+**Tradeoffs**: <one per `Type: tradeoff` — alternative rejected + reason>
+**Discovered constraints**: <one per `Type: surprise`>
+**Open decisions**: <one per `Type: open-decision` — the issue, the options, and who decides>
+
+</details>
+```
+
+## Lineage (renders within the Related Issue row)
+
+### PR lineage — stacked / split chain
+
+```markdown
+**PR lineage**: Part 3 of 5. Prev #1234 · Next #1236. Epic FAC-100.
+**Type**: stacked (merge in order) | split (atomic — any order)
+```
+
+### Stack block — `stack`-managed chains
+
+When the branch is part of a `stack`-managed chain (see the **stack-cli** skill), the CLI owns a marker-delimited checklist in the body, rendered inside Related Issue right after the prose lineage line. The two are complementary, not redundant: the lineage line is the human narrative (part N of M, epic, merge order); the stack block is the live state — every PR a `#NNN` link (GitHub auto-links them; branch paths dropped), boxes checked as each lands.
+
+```markdown
+<!-- stack:links:start -->
+
+### Stack
+
+- [x] #101
+- [ ] #102
+- [ ] **#103** 👈 current
+<!-- stack:links:end -->
+```
+
+**Never hand-edit it** — `stack sync` (and `stack merge --apply/--auto`) write it, infer order from PR bases, and preserve landed checkmarks. Your only job: keep the `stack:links:start`…`:end` markers intact when you PATCH the body, then `stack sync` to refresh (refresh.md handles it as generated-appendix drift). Don't hand-author one either: no `stack` chain, no block — a lone lineage line is right.
+
+---
+
+**Changes since last review** is refresh-only; its template lives in `refresh.md` (Phase 2, the revision-log carve-out), not here.

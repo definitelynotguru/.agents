@@ -1,0 +1,205 @@
+# Surfaces
+
+The destination decides the grammar, never the view. Select the view first
+(`representations.md`), then render it in what the destination displays.
+Changing the renderer never fixes a badly chosen relationship.
+
+| Destination | Displays | Grammar |
+|---|---|---|
+| Terminal (chat reply, CLI, tool output) | Markdown text and fenced code; a ```` ```mermaid ```` or HTML block appears as raw source unless the client is known to render it | typed fences, indented trees, aligned tables, numbered sequence lines |
+| GitHub body or comment | Markdown, fenced code, uploaded images; Mermaid only at the host's pinned version and theme; strips HTML styles and scripts | an uploaded image for every view; Markdown code only for verbatim source the reader copies |
+| Slack message or thread | mrkdwn: bold, italic, code spans, unhighlighted code blocks that rewrap on narrow panes, `•` bullets, links; uploaded images; an attached self-contained HTML file, rendered inline as a page. No tables, headers, Mermaid, or highlighting in a message | a short code-block tree or sequence; everything else an image |
+| Browser file or document | HTML, inline SVG, embedded images, selectable code | one focused file, or a figure inside the caller's document |
+
+This skill owns visual selection, construction, rendering, and embedding.
+`excalidraw` supplies its authoring format and renderer commands; `design-doc`
+supplies document components and tokens. Callers own placement and publication,
+not a second diagram policy.
+
+## Terminal
+
+- Default to text grammars. Some chat clients render Mermaid or HTML, but the
+  model cannot see which one is reading, so emit those only when the owning
+  workflow states the client renders them.
+- Keep lines under about 100 columns; the reader's pane is narrower than the
+  model's output. Wrap tree labels rather than run wide.
+- Sequences use numbered `actor → actor: message` lines.
+
+## GitHub
+
+- Only verbatim source stays text: quoted lines, real hunks, and type
+  signatures the reader will copy, fenced with a language and the path on the
+  line above. Anything the reviewer should open gets a permalink pinned to a
+  sha, never a branch:
+  `https://github.com/<owner>/<repo>/blob/<sha>/<path>#L<n>-L<m>`.
+- `diff` fences hold real source hunks only, never summary bullets ("Layout
+  must encode a relation" in `representations.md`); a structural before/after
+  is an image.
+- Every other view ships as one polished [image](#image): call and file
+  trees, pseudocode, diagrams, sequences, state and dependency graphs,
+  before/after panels, charts, and tables that carry badges, color, or grouped
+  emphasis. Never a text block standing in for a picture. Markdown and GitHub's
+  pinned Mermaid cannot carry layout, color, or emphasis, and a rough view
+  gets skimmed past. A table of plain values the reader copies (computed
+  counts) stays Markdown.
+- Never paste a Mermaid fence or ASCII panels into GitHub. Mermaid may author
+  a diagram you render locally in the house theme and capture.
+- The image's alt text states its takeaway, not its topic: "Reference
+  decisions compared with this PR: 8 differ or missing, 1 partial, 2 match".
+  Keep a code companion as Markdown text beside it so it stays selectable.
+  Return files to `pr-description/references/artifacts.md` for authorized
+  upload and placement.
+
+## Slack
+
+`slack-cli` owns mrkdwn formatting and delivery; this section owns what the
+view becomes.
+
+- Text only when the view survives rewrapping: a numbered sequence or a tree
+  of about 10 lines under about 60 columns, in a code block.
+- Everything else is an [image](#image): before/after panels, tables
+  (including policy before/after), wide call trees, several views in one
+  answer. Never post ASCII panels or a Markdown table in a code block: the
+  reader gets an unhighlighted grid that rewraps on a phone, and asks for an
+  image.
+- Text reply: answer the question in its first sentence ("Yes, one change:
+  ..."), point at the image, and keep only what the image cannot carry or the
+  reader will copy, such as the function to search for. Never restate the image.
+- Hand the PNG and the reply to `slack-cli` delivery.
+
+## Image
+
+One recipe for every image destination (GitHub, Slack). The output is the
+captured PNG; author it however reads best (hand SVG, Mermaid themed locally,
+an `excalidraw` render).
+
+- One self-contained HTML view per image (Browser recipe), reusing
+  `design-doc`'s tokens (`../../design-doc/references/template.html`) so every
+  image in one body or thread shares a look.
+- Width by destination: GitHub about 900 CSS px, because a PR body column is
+  about 880 px wide and GitHub shrinks wider images, text included; Slack 1200
+  to 1400 CSS px, read expanded. Body text at least 14px; capture at 2×
+  ([capture](#capture-to-png)).
+- Dark theme by default, on an opaque background: both hosts show one file in
+  light and dark themes, and `design-doc`'s dark tokens are the house look.
+- A title naming the question and a one-sentence subtitle with the takeaway;
+  real symbols and paths in monospace. Before/after panels keep matching rows
+  in matching positions and badge each row (unchanged, new, moved); tables
+  mark the surprise row; a trade-off goes in a footer line.
+- Check before handing it over: `Read` the PNG at `image_quality="high"`.
+  Nothing clipped or overlapping, every label readable at the destination
+  width, every arrow on its intended target. An image you cannot render and
+  inspect is an unverified draft, never published.
+
+## Browser
+
+For `as html`, produce one focused file. For a document caller, return a figure
+and optional code block using its existing CSS tokens and components, not a
+second page scaffold or theme. In `design-doc`, these are `figure.diagram`,
+the template's SVG classes, and `pre.code`; document-wide capture stays there.
+
+Use HTML when the view benefits from custom layout: an annotated algorithm,
+an ownership diagram beside a type definition, a sequence with more lanes than
+Mermaid keeps legible. A standalone view is not a walkthrough (`/explain-diff`)
+or an RFC (`design-doc`).
+
+Recipe:
+
+- File: the path the user requested; otherwise a unique name such as
+  `/tmp/YYYY-MM-DD-show-me-<slug>-<HHMMSS>.html`, never overwriting another
+  run. Write inside the workspace only when the harness requires it there.
+  Self-contained: inline CSS, no CDN, no JS unless the view is interactive.
+  Embedded figures inherit the caller's file location and asset policy.
+- Semantic hierarchy: the heading names the question (`<h1>` only for a
+  standalone file); one `<figure>` per view, `<figcaption>` for the implication,
+  and `<pre><code>` for code. Give SVGs a title/accessible label and images alt text.
+- Whitespace: one idea per viewport; at least 24px between blocks; prose at
+  about 72ch, diagrams may run wider.
+- Edges: short labelled arrows (SVG `<line>` plus `<text>`), one label each.
+- Inline SVG inherits the document's themes through CSS variables/classes.
+  Reuse its primary-path accent and neutral supporting colors; don't invent
+  another palette. Size boxes to the rendered labels plus padding, not guessed
+  character counts. Wait for fonts before checking text bounds and collisions.
+- Code stays selectable text with syntax highlighting from `<span>` classes
+  (keyword, type, string, comment) and a palette that follows
+  `prefers-color-scheme`; never an image of code.
+- Narrow viewport: at about 400px the page and the core diagram reflow (stack
+  panels, wrap labels, switch a wide SVG to a vertical layout) and stay
+  legible; never shrink an SVG into unreadable text or fall back to horizontal page
+  scrolling. Only a code block may scroll horizontally, and only when its
+  syntax cannot wrap.
+- Verify the actual render at its delivery width, plus about 400px for
+  responsive HTML, in light and dark (agent-browser or the caller's Playwright
+  capture). Inspect arrow endpoints, label/box collisions, contrast, code
+  clipping, and page overflow. Reuse passing captures of the unchanged view;
+  don't repeat full-document or authenticated-UI checks for a local figure.
+
+### Capture to PNG
+
+Wrap the view in one element (`<main id="view">`) and capture that element at
+2× device scale:
+
+```bash
+agent-browser --session showme open file:///tmp/<view>.html
+agent-browser --session showme set viewport 1400 2400 2  # width and height >= the view's; scale 2
+agent-browser --session showme screenshot '#view' /tmp/<view>.png
+agent-browser --session showme close
+```
+
+Then `Read` the PNG at `image_quality="high"`; clipping and overlap are
+invisible at default quality.
+
+## Reusing and embedding assets
+
+Reuse a verified existing diagram when it fits the destination. If its labels
+would become unreadable, adapt the source layout or narrow the question;
+reusing the drawing does not mean preserving an unsuitable aspect ratio.
+Its format follows the destination:
+
+- **HTML:** embed vector diagrams as SVG, not base64 PNG. Keep raster formats
+  for intrinsically raster sources (screenshots/photos). A few large PNG data URIs
+  can push a single-file document past its host's content limit.
+- **Image-only destinations such as GitHub attachments:** render/capture PNG
+  for display; keep editable/vector source separately. An editing link alone
+  is not an inline diagram.
+- **Excalidraw:** load that skill for JSON, register, and `excalirender` flags.
+  For HTML, render transparent light/dark SVG variants; for image attachments,
+  render PNG variants; that skill owns source-color and inversion rules.
+
+Inline SVG can share document CSS. An SVG loaded through `<img>` cannot; embed
+pre-rendered theme variants as `data:image/svg+xml;base64,...` instead, with
+this pattern (HTML documents only; GitHub and Slack take one opaque image):
+
+```html
+<picture>
+  <source srcset="DARK_ASSET" media="(prefers-color-scheme: dark)">
+  <img src="LIGHT_ASSET" alt="The relationship this diagram explains">
+</picture>
+```
+
+For HTML documents, set `figure img, figure picture` to
+`width: 100%; height: auto; display: block`. Inject encoded assets into
+placeholder tokens with a small script instead of pasting large strings through
+editor tools. The caller checks its host's size/truncation limit after publishing.
+
+**Source access:** auth-gated GitHub attachments and private CDNs may work inside
+their host but fail from `file://` or gist previews. Do not hotlink them there.
+Use verified local image bytes for embedding; a successful HTTP response can
+be a login/SAML HTML page, so check content type and decode the image before use.
+Adding a GitHub token does not prove a session-gated attachment is downloadable.
+For gated video, use a local poster linked to the asset's host page (the
+`design-doc` template has `figure.demo`), or an authorized accessible media host.
+Converting to GIF does not remove access restrictions on the resulting file.
+Never move private material to a public host just to make an embed work.
+
+Open source links you can reach; report auth-blocked links as unchecked. Local
+Git blob/range checks establish source fidelity, not remote access. Report
+unavailable render/access checks without escalating to account or GUI work
+unless that verification is needed for the requested deliverable.
+
+## Handover
+
+Deliver the local path as a link, a one-line caption naming the relationship
+the view shows, and optionally a captured preview when the harness displays
+images. Do not restate the view as prose. Publishing or attaching belongs to
+the owning workflow; never upload unrequested.

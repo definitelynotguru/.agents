@@ -1,0 +1,354 @@
+# Representation selection
+
+Start from the reader's question, not from the form. Take the smallest view
+that makes the answer obvious, then render it in the grammar the destination
+displays (`surfaces.md`). A table is a view when alignment carries meaning; an
+elaborate diagram is not inherently better than four typed lines.
+
+## Question to view
+
+Scope each view to one concrete relationship or decision. A broad PR outcome
+may depend on several independent mechanisms; give each its own view rather
+than turn the whole change inventory into one ordered flow. Whether a view may
+be omitted is settled in `SKILL.md` (Check before sending).
+
+| Reader's question | Primary view | Must contain |
+|---|---|---|
+| Where does each responsibility live? | Responsibility tree | real paths, one responsibility each |
+| How is the UI composed, where does state live? | Component tree (JSX) | real components, state owners, boundaries |
+| What calls what? | Call tree | real symbols; changed or failing edges marked |
+| Who acts in what order? | Sequence | actors, ordered messages, payload or state on arrows |
+| How can state change? | State table or state diagram | prior state, event, next state, invariant |
+| What does the algorithm do? | Typed code or labelled pseudocode | decisions, mutations, return shape |
+| What shape should the code have? | Types and signatures | minimal types, function boundaries, ownership |
+| What structurally changed? | Before/after of real structure | unchanged context plus the delta |
+| What does the stored or sent data look like now? | Artifact diff | one real sample captured on both sides; the untouched records around the delta |
+| What happens to each surface or behavior now? | Policy before/after table | one row per surface; old mechanism and limit, new limit and pointer, owning commit or module; the surprise row marked |
+| Which work depends on which? | Dependency graph | nodes, directed edges, independent branches |
+| Which path produced the failure? | Causal flow | expected path, first wrong edge, downstream symptom |
+| How much changed, under what conditions? | Quantitative comparison | units, scale, baseline, measurement frame, delta |
+| Where do these failures come from, and what fixes them? | Attribution | the counted set with its source and window; observed-state, mechanism, and fix columns that each sum to it; each mechanism's proof; an unresolved part; ruled-out mechanisms with the count that ruled each out |
+| How big is it, and where does the size sit? | Breakdown | the counted whole at a pinned revision, the counting rule, parts that sum to it, the figure the reader already holds reconciled |
+
+## Code companion
+
+The primary view may carry one typed block beside it when a reader needs a
+detail the view cannot hold: the signature behind a changed call-tree edge, the
+discriminated union behind a state table, the branch that selects a sequence
+path. The companion fills a gap; it never restates the view or the prose. When
+the primary view is already code (algorithm, types), there is no companion.
+
+## Layout must encode a relation
+
+Indentation, arrows, rows, and diff lines each mean one thing a reader can
+follow: call nesting, containment, ownership, sequence, decision, transition,
+or dependency. Verbs are fine as labels: `worker owns` on a transition,
+`request boundary` beside a file, `stale secret key` on a data edge. The defect
+is layout that means nothing: branches that enumerate what a node also does,
+siblings whose adjacency carries no order or ownership, a `diff` whose lines
+are summary sentences. Such a view passes every length check and shows nothing.
+
+Enumeration dressed as a tree (reject):
+
+```diff
+ request
+-└── route owns retry + persistence + response
++└── runner
++    ├── owns retry + persistence
++    └── returns final result to route
+```
+
+The two branches under `runner` are sentences about it; indentation means only
+"same paragraph", and the reader still cannot tell what calls what or where
+the retry loop lives.
+
+The relation it summarized (accept; illustrative symbols):
+
+```text
+handleRequest()                         route.ts
+└── runJob(job, signal)                 runner.ts   ← new owner
+    ├── withRetry(attempt)
+    └── persistResult(jobId, result)    store.ts
+```
+
+```ts
+// runner.ts (illustrative)
+export function runJob(job: QueuedJob, signal: AbortSignal): Promise<DoneJob>
+```
+
+Indentation now means "called by", and every line is a symbol the reader can
+open.
+
+## Code fidelity
+
+- Verbatim source carries its path (and line range when the reader should open
+  it). Never edit quoted lines silently; mark elisions with `// ...`.
+- Whole block or small diff: show the whole function when its control flow is
+  the point or most lines changed; show a `diff` hunk when unchanged context
+  dominates and the delta is a few lines. Either way the fence is real source.
+- Pseudocode and proposed shapes are labelled (`// pseudocode`,
+  `// illustrative`) and use a typed fence so highlighting preserves shape.
+- Prefer one canonical type per meaning; show only fields consumers observe.
+
+## Inline grammars
+
+The short grammars (pseudocode, call tree, component tree, file tree, diff of
+shape, types) live in `SKILL.md`; this file holds the ones that need rules.
+Every example is illustrative; its symbols are placeholders for real ones. Text
+grammars render everywhere. Mermaid variants author diagrams you render locally
+and capture for GitHub and Slack (`surfaces.md#image`).
+
+### Sequence
+
+Terminal grammar:
+
+```text
+1. User   → Client: click submit
+2. Client → API:    POST /jobs
+3. API    → Queue:  enqueue(jobId)
+4. API    → Client: 202 { jobId }
+5. Queue  → Worker: deliver(jobId)
+```
+
+Diagram grammar (render locally, ship the image):
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as API
+  participant Q as Queue
+  C->>A: POST /jobs
+  A->>Q: enqueue(jobId)
+  A-->>C: 202 { jobId }
+```
+
+Use a sequence only when order across actors matters. Put payloads or state
+changes on arrows; omit actors that do no work. Never draw fixed-width text
+lifelines: label width and wrapping make arrows land on the wrong actor.
+
+Every lifeline is an actor the source shows sending or receiving each message
+drawn on it: a process, function, service, or queue with a name a reader can
+open. An enclosing boundary is not an actor; it groups the actors it
+encloses (Mermaid `box`, or a labelled divider in the numbered grammar), and a
+step that runs inside one belongs to the actor that executes it. When the
+source does not establish the order between two steps, omit one or mark the
+edge `order unverified` rather than pick one; independent concerns are not a
+lifecycle.
+
+### State table and state diagram
+
+```text
+| Before  | Event       | After   | Invariant                  |
+|---------|-------------|---------|----------------------------|
+| queued  | worker owns | running | one owner                  |
+| running | succeeds    | done    | result persisted before UI |
+```
+
+```mermaid
+stateDiagram-v2
+  queued --> running: worker owns
+  running --> done: succeeds
+  running --> queued: worker lost
+```
+
+The table carries invariants; the diagram carries topology. Do not collapse
+distinct states to shorten either.
+
+### Before/after panels (graphical)
+
+A `diff` fence is the text form of "what changed" (`SKILL.md`). For a graphical
+contrast, use before/after panels separated by a labelled divider. Keep
+unchanged actors in corresponding positions, mute unchanged structure, and
+highlight the changed edge or boundary. The panels must expose the delta, not
+repeat two inventories. Use the caller's existing contrast classes rather than
+inventing another theme.
+
+### Artifact diff
+
+For a change to what the code stores or sends (a session file, database row,
+wire payload, log, generated file, command output), when the reader asks what
+it looks like now and what is left alone. Text the diff itself edits (a
+prompt, a tool description, a golden) needs no capture: quote its hunk.
+
+```diff
+--- session.jsonl   dev      187,692 B, 26 rows
++++ session.jsonl   PR #123   69,281 B, 26 rows
+@@ rows 6-8 of 26 @@
+ 6   {"role":"assistant","content":[{"type":"tool_use","name":"Read", …}]}
+-7   {"role":"user","content":[{"type":"tool_result","content":"{\"type\":\"image\", … 64 KiB of base64 …}"}]}   65,908 B
++7   {"role":"user","content":[{"type":"tool_result","content":"Read /ws/shot.png: image/jpeg"}]}                   450 B
+ 8   {"role":"user","content":[{"type":"tool_result","content":[ … ]}]}
+```
+
+- Capture both sides by running the same input on the base and on the change;
+  label a side composed from the code instead `illustrative`.
+- Keep the untouched records around the delta: they show what is left alone,
+  which the changed record alone can only assert.
+- Put totals (records, bytes) in the header and sizes beside changed records
+  only when the question is loss or size.
+- Cut within a record and never drop one from the range shown. Label each cut
+  with what it stood for, and name under the view the fields left out because
+  they differ between runs (ids, timestamps).
+- Several artifacts share one diff, a header pair per file.
+
+### Policy before/after table
+
+For a rule that changes on several surfaces at once (limits, markers, routing,
+ownership), when the reader's question is "what happens to each surface now?"
+rather than how one structure changed. Alignment carries the meaning: a reader
+scans one column to see every old limit, the next to see every new one.
+
+```markdown
+| Surface | Before | After | Commit |
+| --- | --- | --- | --- |
+| Execute, direct | 8 KiB head + 8 KiB tail, then a 12,000-character keyword summary | 16 KiB as composed; terminal log, kept when cut | 2 |
+| Read, direct | 60,000-character head-only cut | 64 KiB head and tail; `Read <path> with offset/limit` | 3 |
+| **Other direct tools** | **no bound** | **16 KiB; artifact** | 3 |
+```
+
+- One row per surface or behavior the reader could ask about, including those
+  that only lose a mechanism. Cells are one clause: old mechanism and limit,
+  new limit and where the whole lives.
+- Mark the surprise row (a surface that gains a bound it never had, or loses
+  one it always had); that is the row a reader will test.
+- Order by owner (commit, module) then by reader interest, so the table doubles
+  as a map into the owning workflow's commit or file inventory.
+- The last column names the owner the reader can open: a commit, a module, a
+  flag. Omit it only when every row has the same owner.
+- Every After cell traces to source reread now, not to the design note; the
+  destination's later sections point at the table instead of restating its
+  rows.
+
+### Dependency graph
+
+```text
+PR 1: contract ──> PR 2: producer ──> PR 3: consumer
+
+PR 4: docs/tests   (independent)
+```
+
+```mermaid
+flowchart LR
+  PR1[PR 1: contract] --> PR2[PR 2: producer] --> PR3[PR 3: consumer]
+  PR4[PR 4: docs/tests]
+```
+
+State atomic groups explicitly. Never draw an edge merely because one item is
+planned earlier.
+
+### Causal flow
+
+```text
+Expected: command → canonical runner → child group → complete evidence
+                                  ×
+Observed: command → detached shell → truncated log → false failure
+                         ↑ first wrong edge
+```
+
+Mark the first unintended transition, not only the visible error. A code
+companion may quote the line where the wrong edge originates.
+
+### Quantitative comparison
+
+Use a table for exact values, or aligned bars when relative magnitude is the
+question. Label units, measurement conditions, and the delta beside the value.
+Bars encoding magnitude start at zero; a narrowed axis is valid for a bounded
+metric (such as ROC-AUC from 0.5 to 1.0) only when its baseline is explicit in
+both axis and caption. Comparisons share a scale. Different benchmark frames
+need separate groups and a clear non-comparability note, not proximity that
+implies a head-to-head result. Use real grid lines, not gradients.
+
+### Breakdown
+
+For one measured whole split into parts (a diff's lines by kind, a bundle's
+bytes by module, a run's time by stage), when the reader asks how big it is,
+how much of it they must read, or where the size sits. Two measurements set
+against each other are a quantitative comparison.
+
+```text
+PR #123 at 9f2c1ab, `git diff --numstat main...HEAD`; core = lines that change what runs
+
+Part         +     −
+Core       111    31   counted as built; by symbol below
+Tests      506    20
+Docs        98    13
+Whole      715    64   host shows +762 −95; the gap is the patch file's headers and context
+
+Core, by symbol            +     −
+render(text, static)      48    11   log-update.js
+blankRows(count)          30     0   log-update.js
+render.commit             17     0   log-update.js
+renderInteractiveFrame    15    20   ink.js
+LogUpdate.commit           1     0   log-update.d.ts
+```
+
+- Every number comes from a command the view names, run at the revision the
+  view pins. For a git diff, start from
+  `../../pr-description/scripts/diff-composition.py`. Hand estimates drift (a
+  57-file, 3.9k-line "tests" guess was 52 files and 3,771 lines when measured).
+- Count what the reader means, not what the tool counts: a patch file is a
+  diff of a diff, a move counts each line twice, a lockfile or snapshot is
+  generated. When that leaves the view's figure different from one the reader
+  already holds (the host's diff stat, a dashboard total), show both and
+  account for the gap in the view's unit.
+- State the rule behind each split (what makes a line core, what counts as a
+  comment). Parts are disjoint and every level sums to its total row; add
+  them up before sending.
+- Keep opposite quantities in separate columns (+ and −), never one churn
+  total or percentage. A deletion-heavy PR priced by churn looks like a heavy
+  read: "876 lines of core" was +174 to read and −702 to check.
+- Order parts by what the reader does with them, the part the question names
+  first, not by size. The lowest rows are things the reader can open: a file
+  or a symbol.
+
+### Attribution
+
+For a counted set of failures (warnings, errors, failed runs) that traces to
+more than one mechanism, when the reader asks where they come from and what
+fixes them. One failure on one path is a causal flow.
+
+```text
+138 "cursor is not in transcript" warnings · factory-traces 2026-11-07 → 11-15 · 96 sessions
+
+State at the load          Mechanism                              Fix
+ 94  turn running       ┐
+ 12  idle, message new  ┴─→ 106  M1 window holds only unsaved   ─→ F1 cursor = durable seq
+                                 rows · reproduced (m01)
+ 18  idle, none queued  ┐
+ 14  no turn telemetry  ┴─→  32  unresolved · cursor not logged ┄→ F3 one session path
+138  every miss ───────────────────────────────────────────────→ F2 error on unknown id
+
+Ruled out in the same 96 sessions
+ M2 frame re-cut            0  "Shrunk oversized response" logs
+ M6 in-place rewrite race   1  "session not found" in 6,748 page calls
+```
+
+- The count, its source, and its window head the view. Each column splits the
+  same count, so every column sums to it (Breakdown's counting rules apply).
+- Split the first column on what was observed at the failure (state, client,
+  version), never on the suspected mechanism: it is the evidence a reader
+  checks the mechanism column against.
+- Each mechanism names its proof: reproduced (which repro), matched in logs,
+  or inferred. Failures no proven mechanism explains are their own
+  `unresolved` part, with what keeps them open, never folded into the nearest
+  mechanism.
+- A fix edge means the fix removes that mechanism; dash it when unproven. A
+  backstop that covers every failure spans the whole count.
+- Ruled-out mechanisms stay, each with the count that ruled it out in the same
+  population: a mechanism missing from the view reads as never checked.
+- Every count comes from the owning analysis; a part it did not count is
+  marked unknown, never estimated.
+- For an image, draw the columns as bands whose widths follow the counts.
+
+## Fidelity check
+
+Before emitting:
+
+1. Every node, edge, type, and quoted line traces to verified evidence.
+2. Direction means exactly one thing throughout.
+3. Unknowns are visibly unknown; absence is not presented as proof.
+4. The view preserves every state or dependency the claim needs.
+5. Removing any remaining node would make the answer incomplete; otherwise
+   remove it.
+6. Every indentation, arrow, and row encodes a relation a reader can follow.
+7. The implication adds a consequence, not a transcription of the view.

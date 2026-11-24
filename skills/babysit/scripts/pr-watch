@@ -1,0 +1,1291 @@
+#!/usr/bin/env python3
+"""pr-watch: block until a GitHub PR needs the agent, then say why and exit.
+
+    pr-watch <pr> [--repo owner/name] [--interval 300] [--once]
+    pr-watch --check
+
+<pr> is a PR number or URL; the repo comes from the URL, --repo, or the
+current checkout. Run one background job per PR. It polls quietly and exits on
+the first poll that needs a decision, so the job's exit is the wake-up. Restart
+it after acting: it remembers what it already reported.
+
+A poll checks the head and base tips in one `git ls-remote` (no API quota),
+then reads REST resources conditionally. It refreshes the PR when either tip
+moves, feedback changes, checks settle, or FULL_EVERY polls elapse. A refresh
+reads the viewer and review edit times from GraphQL. No cached thread resolution
+authorizes READY.
+
+At each poll, compare the same GitHub bucket's remaining balance with its
+balance at the last poll. That drop includes other machines and clients. When
+the observed spend per poll would consume more than half the remaining quota
+before reset, lengthen the interval; on a first sample use this poll's counted
+requests. This is feedback, not a reservation or a guessed fleet size. The
+minimum cadence is 300 seconds. A watcher re-executes itself when its file changes on disk.
+
+A droid daemon restart kills every background job without an exit notice, so
+a watcher can vanish silently. --check lists this machine's watchers: alive,
+or dead without a verdict with the command that restarts it (exit 1 if any).
+
+--once evaluates the PR a single time and reports everything open now, without
+waiting: ACTION when any line needs the agent, WAIT when only waiting lines
+remain, READY otherwise. Each failed optional check, and the risk assessment of
+the head, is listed whatever the verdict and never sets it, since what either
+means is the agent's call. It neither reads nor saves reported keys, though a
+MERGED or CLOSED verdict still deletes the PR's state. Run it whenever you
+need the PR's current state and immediately before merging; pin the merge to
+the head sha that the verdict line ends with.
+
+Stdout carries event lines, then one verdict line; progress goes to stderr.
+
+  READY   exit 0  approved; every check finished and every gating check passed;
+                  no unresolved review thread; no pending review; and GitHub
+                  reports it mergeable (CLEAN, HAS_HOOKS, or UNSTABLE), however
+                  far the base moved
+  MERGED  exit 0
+  ACTION  exit 1  the event lines say what needs doing
+  REVIEW_STOP exit 1  two distinct agent fix pushes drew new bot findings.
+                  Reply/ticket without another patch until this head has a
+                  completed ground-up dossier in the PR worktree.
+  CLOSED  exit 1
+  ERROR   exit 2  bad input, another watcher holds the PR, or GitHub failed
+  WAIT    exit 3  --once only: nothing gates on the agent; the waiting lines
+                  name what resolves without it
+
+Events
+  check-failed  a check failed on the head; the PR author's own decision
+                whether an optional failure is real. While a PR has neither
+                an approval nor the e2e:run label, the E2E workflow waits by
+                design, and its "E2E waits for approval" annotation says so:
+                on each failed status run (the older form), or as the plan
+                job's notice while the status jobs skip and their required
+                checks never report. Either is a wait, not a failure
+  comment, review
+                top-level feedback newer than the authenticated account's last
+                top-level comment or submitted review. Comments from CI and
+                deploy bots and factory-service-* accounts are skipped, since
+                checks carry that news, as is Linear's linkback comment to the
+                issue
+  risk-assessment
+                the repository's risk assessment scored the PR's head: its
+                verdict and first points, once per head and verdict, however
+                often its comment is rewritten. Its waiting and running
+                notices, and a score of an older head, are status
+  thread        a review thread that is unresolved and whose last submitted
+                comment is not the agent's, outdated or not: a review drafted
+                on an older commit is outdated the moment it is submitted
+  pending-review
+                the viewer's review is unsubmitted. GraphQL review mutations
+                file the account's comments and thread replies into it, where
+                only the account can read them, so its threads read as
+                answered to the agent and as silent to everyone else
+  body-stale    the description's last pr-desc-base marker is behind the head;
+                an unmarked description does not opt in to refresh
+  conflict      the branch conflicts with its base
+  behind        branch protection requires the branch to be current; GitHub
+                reports BEHIND only then, so a behind PR on any other base
+                stays mergeable
+  unresolved    otherwise ready, but review threads are unresolved, answered
+                and outdated ones included: they still block merging
+  (BLOCKED)     otherwise ready, but GitHub still reports BLOCKED: a wait, since
+                REST has no review decision and an approval branch protection
+                does not count yet (a code owner's is missing) looks the same
+
+Gating checks are the required checks of the branch the PR finally lands in:
+its base, or for a stacked PR the base of the bottom PR of its stack (each
+open PR from the base below it into another branch of the same repository,
+followed down; a fork's PR that pulls the branch into its own copy is no part
+of it). A stacked PR gates only on the ones reporting on its head, since
+workflows into the landing branch often filter on it and run only once GitHub
+retargets the PR there. A landing branch that requires none makes every check
+gate.
+
+GitHub gives top-level replies no parent. Triage every open item on a wake;
+the account's next top-level word clears earlier versions together. A later
+edit can reopen feedback, including a QA report edited from passing to failed.
+Inline replies are thread-local: only a submitted reply ending in AGENT_MARK
+counts as the agent's. A pending draft speaks to nobody.
+
+State lives in $XDG_STATE_HOME/pr-watch (default ~/.local/state/pr-watch): the
+keys the watcher has reported, so a restart never re-wakes on what it already
+reported. There is no first-run baseline: a first run reports everything open.
+Its required/ directory caches each base's required checks for every process,
+revalidated by ETag on each process's first read.
+Feedback is keyed by comment and its version, its latest edit or else its
+posting (a thread by its last comment), so a new reply or an edit wakes the
+watcher once; a pending review by its comment count, so each reply
+filed into it wakes again; gate events are keyed by head and base. A MERGED or
+CLOSED exit deletes the PR's state.
+
+Adapted from pr-wait in https://github.com/t3dotgg/tstack:
+
+  MIT License
+
+  Copyright (c) 2026 Theo Browne
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import html
+import json
+import math
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, NoReturn
+from urllib.parse import quote
+
+Json = dict[str, Any]
+SELF = Path(__file__).resolve()
+
+STATE_DIR = (
+    Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    / "pr-watch"
+)
+# The agent ends every reply it posts with this. It often shares one GitHub
+# account with the user, so the author alone cannot tell their comments apart.
+AGENT_MARK = "<!-- agent-reply -->"
+FIX_RECEIPT = re.compile(r"(?im)^Fixed in ([^\n]+)")
+COMMIT_REF = re.compile(r"(?<![a-zA-Z0-9])[0-9a-f]{7,40}(?![a-zA-Z0-9])")
+# Service accounts are GitHub Users that automation drives, such as the snyk
+# scanner, so their author type alone reads as human.
+SERVICE_PREFIX = "factory-service-"
+STATUS_BOTS = (
+    SERVICE_PREFIX,
+    "github-actions",
+    "vercel",
+    "netlify",
+    "railway",
+    "cloudflare",
+    "codecov",
+)
+# Linear's bot links every PR to its issue in one comment opening with this
+# marker: a link, not feedback. Its other comments still count.
+LINEAR_BOT = "linear-code"
+LINKBACK = "<!-- linear-linkback -->"
+# The repository's risk assessment is one bot comment opening with
+# this marker, rewritten in place on every push: "Waiting" and "Running" until
+# it scores the head, then its verdict and the head it scored: in a hidden
+# marker, or in the visible line of a comment published before the marker.
+RISK_MARK = "<!-- factory-pr-risk -->"
+DESC_BASE = re.compile(r"^<!-- pr-desc-base: ([0-9a-f]{7,40}) -->\r?$", re.MULTILINE)
+RISK_VERDICT = re.compile(r"^## Risk Assessment: (.+)$", re.MULTILINE)
+RISK_HEAD = re.compile(r"(?:<!-- factory-pr-risk-scored-head: |Scored head `)([0-9a-f]{7,40})")
+PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+# The E2E workflow waits by design until the PR has an approving review or this
+# label. It used to fail its status jobs, annotating each with GATE_TITLE; since
+# factory-mono#30901 its PLAN_JOB carries GATE_TITLE as a notice and the status
+# jobs skip, so their required checks never report (a skipped job's name is its
+# unrendered template, matching no required name). The match is the annotation,
+# not a check name, so a reworded gate fails loudly again.
+GATE_TITLE = "E2E waits for approval"
+GATE_LABEL = "e2e:run"
+PLAN_JOB = "plan"
+# Worst run wins per name, except a cancelled run loses to any other run: a
+# concurrency group cancels the duplicate push or pull_request run of a job.
+RANK = {"fail": 3, "pending": 2, "gate": 2, "pass": 1, "cancelled": 0}
+MERGEABLE = {"CLEAN", "UNSTABLE", "HAS_HOOKS"}
+MAX_FAILED_POLLS = 10
+TRANSIENT = re.compile(
+    r"HTTP 5\d\d|timed? ?out|connection (reset|refused)|EOF|temporar|"
+    r"could not resolve host|TLS handshake|Something went wrong",
+    re.IGNORECASE,
+)
+# GitHub words its secondary limit as abuse detection too, with a 403.
+RATE_LIMITED = re.compile(r"rate limit|abuse detection|HTTP 429", re.IGNORECASE)
+# A 404 or 403 carries no ETag to revalidate against. For classic protection
+# it means the token lacks admin, which changes only when the token gains it.
+# gh ends its last stderr line with the status; a rate-limit 403 never gets here.
+DENIED = re.compile(r"\(HTTP 40[34]\)$")
+DENIED_TTL = 24 * 3600
+
+
+# REST pages hold at most 100 items; the next page's URL comes in the Link header.
+PAGE = 100
+NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+# REST exposes neither review edit times nor thread resolution.
+REVIEWS = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { id }
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviews(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id databaseId url state author { login } viewerDidAuthor
+              body submittedAt lastEditedAt commit { oid } comments { totalCount } }
+    }
+  } }
+}
+"""
+THREADS = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviewThreads(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { isResolved comments(first: 1) { nodes { databaseId } } }
+    }
+  } }
+}
+"""
+# Under this share of GraphQL left, the thread read is skipped.
+LOW = 0.20
+MIN_INTERVAL = 300
+SHARE = 0.5
+# The PR itself is re-read at least every this many polls: its merge state can
+# change with nothing on the PR changing, when its base moves.
+FULL_EVERY = 6
+
+
+class GhError(Exception):
+    pass
+
+
+def log(message: str) -> None:
+    print(f"pr-watch: {message}", file=sys.stderr, flush=True)
+
+
+def fail(message: str) -> NoReturn:
+    print(f"pr-watch: {message}\nERROR", flush=True)
+    sys.exit(2)
+
+
+def header(head: str, name: str) -> str | None:
+    found = re.search(rf"^{name}: *(.+?)\s*$", head, re.IGNORECASE | re.MULTILINE)
+    return found and found[1]
+
+
+class Budget:
+    """The rate-limit buckets as the latest responses report them, and the
+    calls they counted. GitHub answers one resource from buckets with different
+    resets, so each (resource, reset) is a bucket of its own."""
+
+    def __init__(self) -> None:
+        self.buckets: dict[str, Json] = {}
+
+    def record(self, out: str) -> tuple[int, str, str]:
+        """A `gh api --include` answer's status, headers, and body. Every
+        status but 304 counts against its bucket."""
+        head, _, body = out.partition("\r\n\r\n") if "\r\n\r\n" in out else out.partition("\n\n")
+        status = re.match(r"HTTP/\S+ (\d+)", head)
+        values = [header(head, f"x-ratelimit-{k}") for k in ("resource", "remaining", "limit", "reset")]
+        code = int(status[1]) if status else 0
+        if all(values):
+            resource, remaining, limit, reset = values
+            bucket = self.buckets.setdefault(f"{resource}@{reset}", {
+                "resource": resource, "limit": int(limit), "reset": int(reset),
+            })
+            bucket["remaining"] = int(remaining)
+            bucket["counted"] = bucket.get("counted", 0) + int(code != 304)
+        return code, head, body
+
+    def low(self, resource: str) -> bool:
+        return any(
+            b["resource"] == resource and b["reset"] > time.time() and b["remaining"] < LOW * b["limit"]
+            for b in self.buckets.values()
+        )
+
+    def pace(self, interval: int, now: float) -> int:
+        delay = interval
+        for key, b in list(self.buckets.items()):
+            window = b["reset"] - now
+            if window <= 0:
+                del self.buckets[key]
+                continue
+            counted = b.pop("counted", None)
+            if counted is None:
+                continue
+            remaining = b["remaining"]
+            spend = max(counted, b.get("previous", remaining) - remaining)
+            b["previous"] = remaining
+            if spend > SHARE * remaining or not remaining:
+                delay = max(delay, math.ceil(window) + 5)
+            elif spend:
+                delay = max(delay, math.ceil(window * spend / (SHARE * remaining)))
+        return delay
+
+    def tightest(self) -> str:
+        if not self.buckets:
+            return "no budget read yet"
+        b = min(self.buckets.values(), key=lambda b: b["remaining"])
+        return f"{b['resource']} {b['remaining']}/{b['limit']} until {datetime.fromtimestamp(b['reset'], UTC):%H:%M:%SZ}"
+
+
+BUDGET = Budget()
+
+
+def wait_for_rate_limit() -> None:
+    """Sleep out a rate limit. A primary limit is spent only when core has 0
+    remaining: sleep until its reset. Any other match is GitHub's secondary
+    limit, which no bucket reports and which lifts within about a minute, so
+    sleeping to a primary reset would blind the watcher for an hour."""
+    proc = subprocess.run(["gh", "api", "rate_limit"], check=False, capture_output=True, text=True)
+    core = json.loads(proc.stdout)["resources"]["core"] if proc.returncode == 0 else {}
+    if core.get("remaining") == 0:
+        delay = min(max(core["reset"] - int(time.time()), 0) + 5, 3600)
+        log(f"GitHub rate limit spent; sleeping {delay}s until it resets")
+    else:
+        delay = random.randint(50, 70)
+        log(f"GitHub secondary rate limit; sleeping {delay}s")
+    time.sleep(delay)
+
+
+def gh(*args: str, unchanged: bool = False) -> str:
+    """Run gh, retrying transient failures. Rate limits go to the poll owner. With
+    unchanged, a 304 answers like a success: gh exits 1 on it."""
+    delay = 2
+    for attempt in range(5):
+        proc = subprocess.run(
+            ["gh", *args], check=False, capture_output=True, text=True
+        )
+        if proc.returncode == 0 or (unchanged and "HTTP 304" in proc.stderr):
+            return proc.stdout
+        message = (
+            proc.stderr.strip().splitlines() or [f"gh exited {proc.returncode}"]
+        )[-1]
+        if not RATE_LIMITED.search(proc.stderr) and TRANSIENT.search(proc.stderr) and attempt < 4:
+            log(f"gh {' '.join(args[:2])}: {message}; retrying in {delay}s")
+            time.sleep(delay)
+            delay *= 2
+        else:
+            raise GhError(message)
+    raise GhError("gh kept failing")
+
+
+def graphql(query: str, **variables: str | int) -> Json:
+    args = ["api", "graphql", "--include", "-f", f"query={query}"]
+    for key, value in variables.items():
+        args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
+    _, _, out = BUDGET.record(gh(*args))
+    try:
+        data = json.loads(out)["data"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise GhError(f"GitHub answered no GraphQL data: {snippet(out)}") from error
+    if data is None:
+        raise GhError(f"GitHub answered no GraphQL data: {snippet(out)}")
+    return data
+
+
+class Rest:
+    """GETs by REST as conditional requests. Each URL's ETag and body are kept
+    in a file per PR, so restarts reuse them: an unchanged resource answers
+    304, which no rate limit counts, and its kept body stands in."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        try:
+            self.cache: Json = json.loads(path.read_text())
+        except (OSError, ValueError):
+            self.cache = {}
+        self.read: Json = {}
+        self.changed = 0
+
+    def get(self, url: str, fresh: bool = True) -> tuple[Any, str | None]:
+        """The body at url and the URL of its next page, if any. Unless fresh,
+        a kept body stands in with no request."""
+        entry = self.cache.get(url, {})
+        if fresh or "body" not in entry:
+            tag = ["-H", f"If-None-Match: {entry['etag']}"] if "etag" in entry and "body" in entry else []
+            status, head, body = BUDGET.record(gh("api", "--include", *tag, url, unchanged=bool(tag)))
+            if status != 304:
+                link = header(head, "link")
+                entry = {"body": json.loads(body), "next": (m := link and NEXT.search(link)) and m[1]}
+                if etag := header(head, "etag"):
+                    entry["etag"] = etag
+                self.changed += 1
+        self.read[url] = entry
+        return entry["body"], entry["next"]
+
+    def all(self, url: str, key: str | None = None, fresh: bool = True) -> list[Json]:
+        """Every page's items: the list each page is, or its key's list."""
+        items: list[Json] = []
+        next_url: str | None = url
+        while next_url:
+            body, next_url = self.get(next_url, fresh)
+            items += body[key] if key else body
+        return items
+
+    def save(self) -> None:
+        """Keep only what this poll read, so a moved head's checks drop out."""
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(self.read))
+        tmp.replace(self.path)
+        self.cache, self.read = self.read, {}
+
+
+def revalidate(source: str, entry: Json, parse: Callable[[Any], list[str]]) -> Json:
+    """A source's cache entry, refreshed: {etag, names} from a readable source,
+    or {denied} when it 404s or 403s. Only the 200 needs --include, for its
+    ETag; gh exits 1 on a 304, which only this conditional request receives."""
+    etag = entry.get("etag")
+    tag = ["-H", f"If-None-Match: {etag}"] if etag else []
+    try:
+        status, head, body = BUDGET.record(gh("api", "--include", *tag, source, unchanged=bool(etag)))
+    except GhError as error:
+        if not DENIED.search(str(error)):
+            raise
+        return {"denied": time.time()}
+    if status == 304:
+        return entry
+    return {"etag": header(head, "etag"), "names": parse(json.loads(body))}
+
+
+def snippet(body: str, limit: int = 160) -> str:
+    body = re.sub(r"<!--.*?-->|<[^>]+>", " ", body or "", flags=re.DOTALL)
+    text = re.sub(r"\s+", " ", html.unescape(body)).strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def login(node: Json) -> str:
+    return (node["author"] or {}).get("login", "ghost")
+
+
+def marked(node: Json) -> bool:
+    return node["body"].rstrip().endswith(AGENT_MARK)
+
+
+def posted(node: Json) -> str:
+    """When a comment or reply was created, or a review submitted."""
+    return node.get("submittedAt") or node["createdAt"]
+
+
+def human(node: Json) -> bool:
+    author = node["author"] or {}
+    return author.get("__typename") == "User" and not login(node).startswith(
+        SERVICE_PREFIX
+    )
+
+
+def noise(node: Json) -> bool:
+    """A bot comment that is no feedback: a status report, the risk assessment
+    (assessment() reports its score) or Linear's linkback."""
+    return not human(node) and (
+        any(b in login(node) for b in STATUS_BOTS)
+        or node["body"].startswith(RISK_MARK)
+        or (login(node) == LINEAR_BOT and node["body"].startswith(LINKBACK))
+    )
+
+
+def assessment(node: Json, head: str) -> tuple[str, str] | None:
+    """The risk assessment's verdict on this head as an event, keyed by head
+    and verdict so its in-place rewrites wake once each; None for any other
+    comment, a notice that is still waiting or running, or another head's score."""
+    body = node["body"]
+    if human(node) or not body.startswith(RISK_MARK):
+        return None
+    verdict, scored = RISK_VERDICT.search(body), RISK_HEAD.search(body)
+    if not (verdict and scored and head.startswith(scored[1])):
+        return None
+    summary = body.split("<details>", 1)[0]
+    bullets = [line[2:] for line in summary.splitlines() if line.startswith("- ")][:2]
+    return (
+        f"risk:{head}:{verdict[1]}",
+        f"risk-assessment {verdict[1]} at {head[:12]}: {snippet(' '.join(bullets), 240)} {node['url']}",
+    )
+
+
+def stamp(node: Json) -> str:
+    """The version of a note: its latest edit, else its posting."""
+    return max(
+        filter(None, (posted(node), node["lastEditedAt"])), key=datetime.fromisoformat
+    )
+
+
+def replies(thread: Json) -> list[Json]:
+    """A thread's comments as everyone else sees them. A pending review
+    hides its comments from all but their author, who is the viewer, so a
+    reply filed into one answers nothing."""
+    return [c for c in thread["comments"]["nodes"] if c["state"] == "SUBMITTED"]
+
+
+def reviewed_fixes(threads: dict[int, list[Json]], reviews_by_id: dict[int, Json],
+                   author: Json) -> dict[str, tuple[str, str]]:
+    """For each reviewed fix tip, bound its push between two bot reviews.
+    A human account is shared: require its agent-marked Fix receipt as well.
+    A reply's commit_id is its thread anchor, not the fix it shipped."""
+    fixes: set[tuple[str, str, str]] = set()
+    findings: dict[str, list[str]] = {}
+    for root_id, thread in threads.items():
+        root = thread[0]
+        review = reviews_by_id.get(root.get("pull_request_review_id"), {})
+        sha = (review.get("commit") or {}).get("oid")
+        if (root["id"] != root_id or (root.get("user") or {}).get("type") != "Bot"
+                or not sha or not review.get("submittedAt") or review["state"] == "PENDING"):
+            continue
+        when = review["submittedAt"]
+        findings.setdefault(sha, []).append(when)
+        for reply in thread[1:]:
+            if ((reply.get("user") or {}).get("login") != author["login"]
+                    or not reply["body"].rstrip().endswith(AGENT_MARK)
+                    or reviews_by_id.get(reply.get("pull_request_review_id"), {}).get("state") == "PENDING"):
+                continue
+            for receipt in FIX_RECEIPT.findall(reply["body"]):
+                fixes.update((token, when, sha) for token in COMMIT_REF.findall(receipt))
+    # An old-head review arriving late is still actionable but cannot stand
+    # in for a review of another fix. Ambiguous abbreviations prove neither.
+    if author["type"] == "Bot":
+        first = min(((min(times), sha) for sha, times in findings.items()), default=None)
+        return {sha: (first[0], max(times)) for sha, times in findings.items() if first and sha != first[1]}
+    result = {}
+    for token, original, old_sha in fixes:
+        matches = [sha for sha in findings if sha.startswith(token)]
+        if len(matches) == 1 and matches[0] != old_sha:
+            sha = matches[0]
+            lower = min(result.get(sha, (original,))[0], original)
+            result[sha] = (lower, max(findings[sha]))
+    return result
+
+
+def ground_up_complete(repo: str, number: int, head: str) -> bool:
+    """Read review-pr's existing dossier, not a second acknowledgement file."""
+    tree = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+    if tree.returncode:
+        return False
+    path = Path(tree.stdout.strip()) / ".agents/review.md"
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeError):
+        return False
+    header, _, sections = text.partition("\n## ")
+    design = re.search(r"^## Reference design\n+(.+?)(?:\n## |\Z)", "\n## " + sections, re.M | re.S)
+    return bool(
+        re.match(rf"# PR {number}\b", header)
+        and f"repo: {repo}" in header.splitlines()
+        and f"reviewed_head: {head}" in header.splitlines()
+        and re.search(r"^mode: ground-up(?:\+crux)?$", header, re.M)
+        and re.search(r"^verdict: (?:APPROVE|COMMENT)$", header, re.M)
+        and design and design[1].strip() and design[1].strip().lower() != "none"
+        and not design[1].lstrip().startswith("<")
+    )
+
+
+def parse_target(raw: str, repo: str | None) -> tuple[str, int]:
+    url = re.fullmatch(
+        r"https?://github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)\S*", raw.strip()
+    )
+    number = re.fullmatch(r"#?(\d+)", raw.strip())
+    if not (url or number):
+        fail(f"'{raw}' is not a PR number or URL")
+    pr = int((url or number).group(2 if url else 1))
+    repo = repo or (url.group(1) if url else None)
+    if not repo:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"], check=False, capture_output=True, text=True
+        ).stdout.strip()
+        found = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$", remote)
+        if not found:
+            fail("no --repo given and the current directory has no GitHub origin remote")
+        repo = found[1]
+    if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
+        fail(f"'{repo}' is not an owner/name repo")
+    return repo, pr
+
+
+def bucket(node: Json, gates: set[str]) -> str:
+    if node["__typename"] == "CheckRun":
+        if node["id"] in gates:
+            return "gate"
+        if node["status"] != "COMPLETED":
+            return "pending"
+        if node["conclusion"] == "CANCELLED":
+            return "cancelled"
+        return "pass" if node["conclusion"] in PASSED else "fail"
+    return {"SUCCESS": "pass", "FAILURE": "fail", "ERROR": "fail"}.get(
+        node["state"], "pending"
+    )
+
+
+def contexts(pr: Json) -> Json:
+    commits = pr["commits"]["nodes"]
+    rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
+    return (rollup or {}).get("contexts") or {"nodes": []}
+
+
+def collapse_checks(pr: Json, gates: set[str]) -> dict[str, Json]:
+    """One entry per check name with its pass, pending, gate, or fail bucket; a
+    job's push and pull_request runs share a name, and either failing fails the
+    job."""
+    checks: dict[str, Json] = {}
+    for node in contexts(pr)["nodes"]:
+        name = node.get("name") or node.get("context")
+        entry = {
+            "bucket": bucket(node, gates),
+            "url": node.get("detailsUrl") or node.get("targetUrl") or "",
+        }
+        if name not in checks or RANK[entry["bucket"]] > RANK[checks[name]["bucket"]]:
+            checks[name] = entry
+    for entry in checks.values():
+        if entry["bucket"] == "cancelled":
+            entry["bucket"] = "fail"
+    return checks
+
+
+class Watcher:
+    def __init__(self, repo: str, number: int, interval: int, once: bool) -> None:
+        self.repo, self.number, self.interval, self.once = repo, number, interval, once
+        self.owner, self.name = repo.split("/")
+        slug = f"{repo.replace('/', '__')}__{number}"
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.state_path = STATE_DIR / f"{slug}.json"
+        self.stop_path = STATE_DIR / f"{slug}.review-stop"
+        self.lock_path = STATE_DIR / f"{slug}.lock"
+        self.reported: set[str] = set()
+        if not once and self.state_path.exists():
+            self.reported = set(json.loads(self.state_path.read_text()))
+        self.events: list[tuple[str, str]] = []
+        self.required: dict[str, set[str]] = {}
+        self.previous: Any = None
+        self.status = ""
+        self.polls = 0
+        self.fresh = True
+        self.delay = interval
+        self.rest = Rest(STATE_DIR / f"{slug}.rest.json")
+        self.review_snapshot: tuple[str, list[Json]] | None = None
+        self.started = SELF.stat().st_mtime
+
+    def lock(self) -> Any:
+        # Held open for the life of the process; the OS drops the lock on exit.
+        handle = open(self.lock_path, "a+")  # noqa: SIM115
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            pid = handle.read().strip() or "unknown"
+            fail(
+                f"pid {pid} already watches {self.repo}#{self.number}; kill it only if its exit never reaches you"
+            )
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        return handle
+
+    def save(self) -> None:
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(self.reported)))
+        tmp.replace(self.state_path)
+
+    def finish(self, verdict: str, detail: str, code: int) -> NoReturn:
+        self.rest.save()
+        for key, line in self.events:
+            print(line, flush=True)
+            self.reported.add(key)
+        print(f"{verdict} {self.repo}#{self.number} {detail}".rstrip(), flush=True)
+        # A lock file outlives only a watcher that died without a verdict, which
+        # is what --check looks for.
+        if not self.once:
+            self.lock_path.unlink(missing_ok=True)
+        if verdict in ("MERGED", "CLOSED"):
+            self.state_path.unlink(missing_ok=True)
+            self.stop_path.unlink(missing_ok=True)
+        elif self.events and not self.once:
+            self.save()
+        sys.exit(code)
+
+    def note(self, node: Json, **fields: Any) -> Json:
+        """A REST comment or review in the shape the evaluation reads. REST
+        names bots `<app>[bot]`; the bare login matches STATUS_BOTS and LINEAR_BOT."""
+        user = node.get("user") or {}
+        updated = node.get("updated_at")
+        return {
+            "id": node["node_id"],
+            "url": node["html_url"],
+            "body": node.get("body") or "",
+            "createdAt": node.get("created_at") or node.get("submitted_at"),
+            "lastEditedAt": updated if updated and updated != node.get("created_at") else None,
+            "author": user
+            and {
+                "login": user["login"].removesuffix("[bot]"),
+                "__typename": "Bot" if user["type"] == "Bot" else "User",
+            },
+            **fields,
+        }
+
+    def fetch(self) -> Json:
+        """The PR, its head's checks, and its feedback, refreshed as above."""
+        repo, n = f"repos/{self.repo}", self.number
+        url = f"{repo}/pulls/{n}"
+        kept = self.rest.cache.get(url, {}).get("body")
+        head = None if self.once or kept is None else self.remote_head(kept)
+        self.fresh = head is None or head != kept["head"]["sha"] or kept.get("mergeable_state") == "unknown"
+        if self.fresh:
+            p, _ = self.rest.get(url)
+            head = p["head"]["sha"]
+        before = self.rest.changed
+        runs = self.rest.all(f"{repo}/commits/{head}/check-runs?per_page={PAGE}", "check_runs")
+        statuses = self.rest.all(f"{repo}/commits/{head}/status?per_page={PAGE}", "statuses")
+        settled = self.rest.changed > before and all(r["status"] == "completed" for r in runs)
+        before = self.rest.changed
+        comments = self.rest.all(f"{repo}/issues/{n}/comments?per_page={PAGE}")
+        if not self.once:
+            # Its ETags detect a changed review without spending GraphQL quota.
+            self.rest.all(f"{repo}/pulls/{n}/reviews?per_page={PAGE}")
+        notes = self.rest.all(f"{repo}/pulls/{n}/comments?per_page={PAGE}")
+        if not self.fresh:
+            self.fresh = (
+                settled or self.rest.changed > before or self.polls % FULL_EVERY == 0
+            )
+            p, _ = self.rest.get(url, self.fresh)
+        self.polls += 1
+        if self.fresh or self.review_snapshot is None:
+            self.review_snapshot = self.read_reviews()
+        viewer, reviewed = self.review_snapshot
+        pending = {r["databaseId"] for r in reviewed if r["state"] == "PENDING"}
+        latest: dict[str, str] = {}
+        for r in reviewed:
+            if r["state"] in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and r["author"]:
+                latest[login(r)] = r["state"]
+        threads: dict[int, list[Json]] = {}
+        for c in sorted(notes, key=lambda c: c["created_at"]):
+            threads.setdefault(c.get("in_reply_to_id") or c["id"], []).append(c)
+        resolved = self.resolution(notes)
+        # REST already persists each PR's paginated inputs. Recompute the
+        # distinct heads, never increment on a poll or count commits in a push.
+        author = p.get("user")
+        if author and p["state"] == "open" and not self.stop_path.exists():
+            fixes = reviewed_fixes(threads, {r["databaseId"]: r for r in reviewed}, author)
+            source = p["head"].get("repo")
+            if len(fixes) >= 2 and source:
+                ref = f"refs/heads/{p['head']['ref']}"
+                url = f"repos/{source['full_name']}/activity?ref={quote(ref, safe='')}&per_page={PAGE}"
+                fix_heads = {
+                    push["after"] for push in self.rest.all(url)
+                    if push["ref"] == ref and push["activity_type"] in ("push", "force_push")
+                    and (push.get("actor") or {}).get("login") == author["login"] and push["after"] in fixes
+                    and fixes[push["after"]][0] <= push["timestamp"] <= fixes[push["after"]][1]
+                }
+                if len(fix_heads) >= 2:
+                    # Monotone across background/--once races, lost ref history
+                    # and edited/deleted replies. Only finish on a closed PR
+                    # removes this latch. A dossier releases its own head only.
+                    self.stop_path.touch(exist_ok=True)
+        return {
+            "url": p["html_url"],
+            "state": "MERGED" if p["merged_at"] else p["state"].upper(),
+            "isDraft": p["draft"],
+            "body": p.get("body") or "",
+            "headRefOid": head,
+            "baseRefName": p["base"]["ref"],
+            "baseRef": {"target": {"oid": p["base"]["sha"]}},
+            "mergeStateStatus": (p.get("mergeable_state") or "unknown").upper(),
+            "reviewDecision": None,
+            "labels": {"nodes": p["labels"]},
+            "latestOpinionatedReviews": {"nodes": [{"state": s} for s in latest.values() if s != "DISMISSED"]},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+                *({"__typename": "CheckRun", "id": r["id"], "name": r["name"], "status": r["status"].upper(),
+                   "conclusion": (r["conclusion"] or "").upper() or None, "detailsUrl": r["html_url"] or r["details_url"]}
+                  for r in runs),
+                *({"__typename": "StatusContext", "context": s["context"], "state": s["state"].upper(),
+                   "targetUrl": s["target_url"]} for s in statuses),
+            ]}}}}]},
+            "comments": {"nodes": [
+                self.note(c, viewerDidAuthor=(c.get("user") or {}).get("node_id") == viewer) for c in comments
+            ]},
+            "reviews": {"nodes": reviewed},
+            "reviewThreads": {"nodes": [
+                {
+                    "isResolved": resolved.get(str(root)),
+                    "path": t[0]["path"],
+                    "line": t[0].get("line") or t[0].get("original_line"),
+                    "comments": {"nodes": [
+                        self.note(c, state="PENDING" if c.get("pull_request_review_id") in pending else "SUBMITTED")
+                        for c in t
+                    ]},
+                }
+                for root, t in threads.items()
+            ]},
+        }
+
+    def read_reviews(self) -> tuple[str, list[Json]]:
+        """REST reviews have no edit timestamp. Use each submitted review's
+        actual edit, not when this watcher happened to observe a new body."""
+        nodes: list[Json] = []
+        after: dict[str, str] = {}
+        while True:
+            data = graphql(REVIEWS, owner=self.owner, name=self.name, number=self.number, **after)
+            page = data["repository"]["pullRequest"]["reviews"]
+            nodes.extend(page["nodes"])
+            if not page["pageInfo"]["hasNextPage"]:
+                return data["viewer"]["id"], nodes
+            after = {"after": page["pageInfo"]["endCursor"]}
+
+    def remote_head(self, pr: Json) -> str | None:
+        """The PR's head by `git ls-remote`, which spends no API budget; None
+        when its base moved or its branch disappeared, forcing a fresh PR read."""
+        base = f"refs/heads/{pr['base']['ref']}"
+        refs = [f"refs/pull/{self.number}/head", base]
+        own = (pr["head"]["repo"] or {}).get("full_name") == self.repo
+        if own:
+            refs.append(f"refs/heads/{pr['head']['ref']}")
+        try:
+            proc = subprocess.run(
+                ["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                 "ls-remote", f"https://github.com/{self.repo}.git", *refs],
+                check=False, capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise GhError("git ls-remote timed out") from error
+        if proc.returncode:
+            raise GhError(f"git ls-remote: {(proc.stderr.strip().splitlines() or ['failed'])[-1]}")
+        found = {ref: sha for sha, ref in (line.split("\t") for line in proc.stdout.splitlines())}
+        if found.get(base) != pr["base"]["sha"] or (own and refs[-1] not in found):
+            return None
+        return found.get(refs[0])
+
+    def resolution(self, notes: list[Json]) -> dict[str, bool]:
+        """A poll may not infer current resolution from unchanged comment text."""
+        if not notes or BUDGET.low("graphql"):
+            return {}
+        nodes: list[Json] = []
+        after: dict[str, str] = {}
+        try:
+            while True:
+                page = graphql(THREADS, owner=self.owner, name=self.name, number=self.number, **after)
+                threads = page["repository"]["pullRequest"]["reviewThreads"]
+                nodes += threads["nodes"]
+                if not threads["pageInfo"]["hasNextPage"]:
+                    break
+                after = {"after": threads["pageInfo"]["endCursor"]}
+        except GhError as error:
+            log(f"thread resolution unread: {error}")
+            return {}
+        return {str(t["comments"]["nodes"][0]["databaseId"]): t["isResolved"] for t in nodes if t["comments"]["nodes"]}
+
+    def landing(self, pr: Json) -> str:
+        """The branch the PR finally lands in, as the module docstring defines it."""
+        branch, seen = pr["baseRefName"], {pr["baseRefName"]}
+        while True:
+            heads = self.rest.all(
+                f"repos/{self.repo}/pulls?state=open&per_page={PAGE}&head={quote(f'{self.owner}:{branch}', safe=':')}",
+                fresh=self.fresh,
+            )
+            above = [
+                h["base"]["ref"]
+                for h in heads
+                if h["head"]["ref"] == branch
+                and h["base"]["repo"]["full_name"] == self.repo
+                and (h["head"]["repo"] or {}).get("full_name") == self.repo
+            ]
+            if not above:
+                return branch
+            if above[0] in seen:
+                raise GhError(
+                    f"the stack under {pr['baseRefName']} loops back to {above[0]}"
+                )
+            branch = above[0]
+            seen.add(branch)
+
+    def gating(self, pr: Json, checks: dict[str, Json]) -> set[str]:
+        """The checks that gate, as the module docstring defines them."""
+        landing = self.landing(pr)
+        required = self.required_checks(landing)
+        if not required:
+            return set(checks)
+        return required if landing == pr["baseRefName"] else required & set(checks)
+
+    def gates(self, pr: Json) -> tuple[set[str], bool]:
+        """Whether the E2E approval gate is waiting (GATE_TITLE on a failed or
+        plan run of the head), and its failed runs. Asked only while the PR has
+        neither an approval nor the label, each run's conditionally on every poll:
+        a run can be rerequested or updated and gain annotations."""
+        if any(
+            r["state"] == "APPROVED" for r in pr["latestOpinionatedReviews"]["nodes"]
+        ) or any(label["name"] == GATE_LABEL for label in pr["labels"]["nodes"]):
+            return set(), False
+        runs = {
+            n["id"]: n["conclusion"] == "FAILURE"
+            for n in contexts(pr)["nodes"]
+            if n["__typename"] == "CheckRun"
+            and (n["conclusion"] == "FAILURE" or n["name"] == PLAN_JOB)
+        }
+        if not runs:
+            return set(), False
+        annotated = {
+            run
+            for run in runs
+            if any(
+                a["title"] == GATE_TITLE
+                for a in self.rest.all(f"repos/{self.repo}/check-runs/{run}/annotations?per_page={PAGE}")
+            )
+        }
+        return {run for run in annotated if runs[run]}, bool(annotated)
+
+    def required_checks(self, base: str) -> set[str]:
+        """Required check names per base, so a required check that has not
+        started counts as pending instead of passing by omission. Rulesets are
+        readable with read access; classic protection needs admin and 404s or
+        403s otherwise. Any other failure propagates so the next poll retries.
+        Every process shares one cache per base and revalidates it by ETag: a
+        304 costs no rate limit."""
+        if base not in self.required:
+            path = (
+                STATE_DIR / "required" / f"{quote(f'{self.repo}:{base}', safe='')}.json"
+            )
+            try:
+                cache: Json = json.loads(path.read_text())
+            except (OSError, ValueError):
+                cache = {}
+            sources = {
+                f"repos/{self.repo}/rules/branches/{base}": lambda rules: [
+                    check["context"]
+                    for rule in rules
+                    if rule["type"] == "required_status_checks"
+                    for check in rule["parameters"]["required_status_checks"]
+                ],
+                f"repos/{self.repo}/branches/{base}/protection/required_status_checks": lambda protection: [
+                    *protection.get("contexts", []),
+                    *(check["context"] for check in protection.get("checks", [])),
+                ],
+            }
+            names: set[str] = set()
+            for source, parse in sources.items():
+                entry = cache.get(source, {})
+                if time.time() - entry.get("denied", 0) >= DENIED_TTL:
+                    entry = cache[source] = revalidate(source, entry, parse)
+                names.update(entry.get("names", []))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(cache))
+            tmp.replace(path)
+            self.required[base] = names
+            log(
+                f"required checks on {base}: "
+                + (", ".join(sorted(names)) or "none required, so every check gates")
+            )
+        return self.required[base]
+
+    def feedback(self, pr: Json) -> Iterator[tuple[str, str]]:
+        """Yield each currently unanswered item, independent of prior wake-ups."""
+        comments = pr["comments"]["nodes"]
+        # An empty COMMENTED review only publishes inline replies; it says
+        # nothing at the top level. An approval or change request is itself a word.
+        reviews = [r for r in pr["reviews"]["nodes"] if r["submittedAt"]
+                   and (r["body"].strip() or r["state"] in ("APPROVED", "CHANGES_REQUESTED"))]
+        last_word = max((datetime.fromisoformat(stamp(n)) for n in (*comments, *reviews) if n["viewerDidAuthor"]),
+                        default=datetime.min.replace(tzinfo=UTC))
+
+        def fresh(node: Json) -> bool:
+            return not node["viewerDidAuthor"] and datetime.fromisoformat(stamp(node)) > last_word
+
+        for c in comments:
+            if fresh(c) and not noise(c):
+                yield (
+                    f"c:{c['id']}:{stamp(c)}",
+                    f"comment from {login(c)}: {snippet(c['body'])} {c['url']}",
+                )
+        for r in reviews:
+            if fresh(r) and r["state"] != "DISMISSED" and (r["state"] == "CHANGES_REQUESTED" or r["body"].strip()):
+                state = r["state"].lower().replace("_", " ")
+                text = f": {snippet(r['body'])}" if r["body"].strip() else ""
+                yield (
+                    f"c:{r['id']}:{stamp(r)}",
+                    f"review from {login(r)} ({state}){text} {r['url']}",
+                )
+        for t in pr["reviewThreads"]["nodes"]:
+            nodes = replies(t)
+            if t["isResolved"] is not False or not nodes or marked(nodes[-1]):
+                continue
+            last = nodes[-1]
+            where = f"{t['path']}:{t['line']}" if t["line"] else t["path"]
+            yield (
+                f"c:{last['id']}:{stamp(last)}",
+                f"thread from {login(last)} on {where}: {snippet(last['body'])} {last['url']}",
+            )
+
+    def evaluate(
+        self,
+        pr: Json,
+        checks: dict[str, Json],
+        gating: set[str],
+        stable: bool,
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Why the head cannot merge now: (key, line) actions the agent must
+        handle, and wait lines for states that resolve without it."""
+        head, base, state = pr["headRefOid"], pr["baseRefName"], pr["mergeStateStatus"]
+        base_oid = ((pr["baseRef"] or {}).get("target") or {}).get("oid", "")
+        actions: list[tuple[str, str]] = []
+        waits: list[str] = []
+
+        synced = DESC_BASE.findall(pr["body"])
+        if synced and not head.startswith(synced[-1]):
+            actions.append((f"body-stale:{head}", f"body-stale: description last reconciled at {synced[-1][:7]}"))
+
+        # Only the viewer's own pending review is visible, and GitHub allows
+        # one per account per PR.
+        for r in pr["reviews"]["nodes"]:
+            if r["state"] == "PENDING":
+                count = r["comments"]["totalCount"]
+                actions.append(
+                    (
+                        f"pending-review:{r['id']}:{count}",
+                        f"pending-review: your unsubmitted review hides comments ({count}) from everyone else {r['url']}",
+                    )
+                )
+        if state == "DIRTY":
+            actions.append(
+                (
+                    f"conflict:{head}:{base_oid}",
+                    f"conflict: the branch conflicts with {base}",
+                )
+            )
+        if state == "BEHIND":
+            actions.append(
+                (
+                    f"behind:{head}:{base_oid}",
+                    f"behind: branch protection requires the branch to be current with {base}",
+                )
+            )
+        for name in sorted(gating):
+            entry = checks.get(name, {"bucket": "pending", "url": ""})
+            if entry["bucket"] == "fail":
+                actions.append(
+                    (
+                        f"fail:{head}:{name}:{entry['url']}",
+                        f"check-failed {name} (gating) {entry['url']}",
+                    )
+                )
+        pending = sorted(
+            n
+            for n in gating | set(checks)
+            if checks.get(n, {"bucket": "pending"})["bucket"] == "pending"
+        )
+        gated = sorted(n for n, c in checks.items() if c["bucket"] == "gate")
+        if pending:
+            waits.append(f"pending checks ({len(pending)}): {', '.join(pending[:5])}")
+        elif not stable:
+            waits.append("checks settling")
+        if gated:
+            waits.append(
+                f"E2E gate ({len(gated)} checks): runs once approved or labelled {GATE_LABEL}"
+            )
+        if pr["isDraft"]:
+            waits.append("draft")
+        decision = pr["reviewDecision"]
+        opinions = {r["state"] for r in pr["latestOpinionatedReviews"]["nodes"]}
+        approved = decision == "APPROVED" or (
+            decision is None
+            and "APPROVED" in opinions
+            and "CHANGES_REQUESTED" not in opinions
+        )
+        if not approved:
+            waits.append(
+                f"review: {(decision or 'no approval').lower().replace('_', ' ')}"
+            )
+        if any(t["isResolved"] is None and replies(t) for t in pr["reviewThreads"]["nodes"]):
+            waits.append("review thread resolution unavailable")
+        if actions or waits:
+            return actions, waits
+
+        unresolved = [
+            notes[0]["url"]
+            for t in pr["reviewThreads"]["nodes"]
+            if not t["isResolved"] and (notes := replies(t))
+        ]
+        if unresolved:
+            return [
+                (
+                    f"unresolved:{head}:{base_oid}:{sorted(unresolved)}",
+                    f"unresolved review threads ({len(unresolved)}): {' '.join(unresolved)}",
+                )
+            ], []
+        # REST has no review decision: an approval that leaves the PR BLOCKED is
+        # one branch protection does not count yet (a code owner's is missing).
+        if state == "BLOCKED":
+            return [], ["blocked: GitHub reports BLOCKED, so a required review (code owner or count), ruleset or merge queue is unmet"]
+        if state not in MERGEABLE:
+            return [], [f"merge state {state}"]
+        return [], []
+
+    def poll(self) -> None:
+        self.events = []
+        pr = self.fetch()
+        head = pr["headRefOid"]
+        if pr["state"] == "MERGED":
+            self.finish("MERGED", pr["url"], 0)
+        if pr["state"] == "CLOSED":
+            self.finish("CLOSED", pr["url"], 1)
+        failed, waiting = self.gates(pr)
+        checks = collapse_checks(pr, failed)
+        gating = self.gating(pr, checks)
+        if waiting:
+            checks |= {n: {"bucket": "gate", "url": ""} for n in gating - set(checks)}
+        # What only the agent can judge: a watcher wakes once on each, and
+        # --once lists them without letting them set its verdict.
+        advisory = [
+            (f"fail:{head}:{name}:{entry['url']}", f"check-failed {name} (optional) {entry['url']}")
+            for name, entry in sorted(checks.items())
+            if entry["bucket"] == "fail" and name not in gating
+        ]
+        advisory += filter(None, (assessment(c, head) for c in pr["comments"]["nodes"]))
+        feedback = list(self.feedback(pr))
+        if self.stop_path.exists():
+            actions, _ = self.evaluate(pr, checks, gating, stable=True)
+            if (feedback or actions) and not ground_up_complete(self.repo, self.number, head):
+                key = f"review-stop:{head}"
+                if self.once or key not in self.reported:
+                    if not self.once:
+                        self.reported.add(key)
+                        self.save()
+                    self.finish("REVIEW_STOP", (
+                        f"@ {head}: fix loop closed. No patch or push. Reply to remaining findings; "
+                        "ticket and link what no user can hit. Run /review-pr ground-up on this PR, "
+                        "including its deeper pass; only its completed .agents/review.md for this head "
+                        "reopens fixing. Recheck with --once."
+                    ), 1)
+                return
+        if self.once:
+            self.events.extend(feedback)
+            actions, waits = self.evaluate(pr, checks, gating, stable=True)
+            self.events += actions
+            verdict, code = (
+                ("ACTION", 1) if self.events else ("WAIT", 3) if waits else ("READY", 0)
+            )
+            self.events += advisory + [("", f"waiting: {w}") for w in waits]
+            self.finish(verdict, f"@ {head}", code)
+
+        # Checks register a few seconds after a push; two identical polls in a
+        # row keep a half-registered (or still empty) set from reading as green.
+        snapshot = (
+            head,
+            sorted((n, c["bucket"]) for n, c in checks.items()),
+            pr["mergeStateStatus"],
+        )
+        stable, self.previous = snapshot == self.previous, snapshot
+
+        actions, waits = self.evaluate(pr, checks, gating, stable)
+        current = feedback + advisory + actions
+        # A resolved thread can reopen without a new comment. Retire its wake
+        # key on observed resolution, never merely because a check is settling.
+        threads = pr["reviewThreads"]["nodes"]
+        cleared = {f"c:{note['id']}:{stamp(note)}" for thread in threads if thread["isResolved"]
+                   for note in replies(thread)}
+        if all(thread["isResolved"] for thread in threads):
+            cleared.update(key for key in self.reported if key.startswith("unresolved:"))
+        if self.reported & cleared:
+            self.reported.difference_update(cleared)
+            self.save()
+        self.events = [(key, line) for key, line in current if key not in self.reported]
+        if self.events:
+            self.finish("ACTION", f"@ {head}", 1)
+        if not actions and not feedback and not waits:
+            self.finish("READY", f"@ {head}", 0)
+        status = f"{self.repo}#{self.number} @ {head[:7]}: " + "; ".join(
+            waits or ["holding: every action here was already reported"]
+        )
+        if status != self.status:
+            self.status = status
+            log(status)
+
+    def run(self) -> NoReturn:
+        failures = 0
+        while True:
+            try:
+                self.poll()
+                self.rest.save()
+                failures = 0
+            except (GhError, KeyError, TypeError, ValueError) as error:
+                if isinstance(error, GhError) and RATE_LIMITED.search(str(error)):
+                    if self.once:
+                        self.events = []
+                        self.finish("WAIT", f"GitHub rate limited this read: {error}", 3)
+                    wait_for_rate_limit()
+                    continue
+                failures += 1
+                log(f"poll failed ({failures}/{MAX_FAILED_POLLS}): {error}")
+                if self.once or failures >= MAX_FAILED_POLLS:
+                    self.events = []
+                    self.finish("ERROR", f"GitHub failed: {error}", 2)
+            self.sleep()
+
+    def sleep(self) -> None:
+        delay = BUDGET.pace(self.interval, time.time())
+        if delay != self.delay:
+            self.delay = delay
+            log(f"tightest budget {BUDGET.tightest()}; polling every {delay}s")
+        time.sleep(delay)
+        # agents-pull fast-forwards ~/.agents every 15 minutes: run what it
+        # brought. The lock fd closes on exec, and the new process takes it.
+        if SELF.stat().st_mtime != self.started:
+            log("pr-watch changed on disk; restarting into it")
+            os.execv(sys.executable, [sys.executable, str(SELF), *sys.argv[1:]])
+
+
+def check() -> NoReturn:
+    """List each watcher on this machine: alive, or dead without a verdict (a
+    droid daemon restart kills its background jobs with no exit notice), with
+    the command that restarts it. Exit 1 when any is dead."""
+    dead = 0
+    for path in sorted(STATE_DIR.glob("*.lock")):
+        repo, number = path.stem.rsplit("__", 1)
+        owner, name = repo.split("__", 1)
+        url = f"https://github.com/{owner}/{name}/pull/{number}"
+        try:
+            handle = path.open()
+        except FileNotFoundError:
+            continue  # The watcher finished between glob and open.
+        with handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                handle.seek(0)
+                print(f"alive {url} pid {handle.read().strip()}")
+                continue
+        dead += 1
+        print(f"dead {url}: restart with {SELF} {url}")
+    sys.exit(1 if dead else 0)
+
+
+def main() -> None:
+    if sys.argv[1:] == ["--check"]:
+        check()
+    parser = argparse.ArgumentParser(
+        prog="pr-watch", description="Block until a GitHub PR needs the agent."
+    )
+    parser.add_argument("pr", help="PR number or URL (or --check alone: list this machine's watchers, alive or dead)")
+    parser.add_argument(
+        "--repo", help="owner/name (default: from the URL or the current checkout)"
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=MIN_INTERVAL,
+        help=f"fastest seconds between polls; a low budget slows them (default and minimum {MIN_INTERVAL})",
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="evaluate the merge gate once and exit"
+    )
+    args = parser.parse_args()
+    repo, number = parse_target(args.pr, args.repo)
+    watcher = Watcher(repo, number, max(args.interval, MIN_INTERVAL), args.once)
+    _lock = None if args.once else watcher.lock()
+    watcher.run()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

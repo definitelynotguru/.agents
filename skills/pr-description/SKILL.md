@@ -1,0 +1,123 @@
+---
+name: pr-description
+description: Write or refresh a PR title and body. Load immediately before `gh pr create`, before PATCHing a PR title or body, and after pushing to a branch with an open PR.
+---
+
+# PR Description
+
+Make the merge case legible from the title and first screen; later sections prove it, scope it, and price its risk.
+
+## Act
+
+| Goal | Action |
+|---|---|
+| Analyze and draft | Load `references/workflow.md`; use three-dot diff analysis, change-plus-payoff title selection, `What / Why / How`, and the first-screen skim gate. |
+| Large diff (roughly 1k+ lines or 20+ files) | Run `scripts/diff-composition.py BASE HEAD --core <behavior files> --tooling <prefixes>`; put the composition table and core table under **What**: grammar from `show-me` (Breakdown), template and placement in `references/conditional-sections.md`. |
+| One rule changed across three or more surfaces, or three or more behaviors changed at once | Open **What** with the rule's before and after, then the per-surface Before → After table: grammar from `show-me` (Policy before/after table), placement in `references/conditional-sections.md`; later sections point at it instead of restating it. |
+| Add conditional sections | Load `references/conditional-sections.md` only when a catalog trigger fires. |
+| Show the change (every PR) | Load `show-me` with the verified diff and GitHub destination; place one or more views under **Architecture** as uploaded dark-themed images, never text blocks; only verbatim source stays text (`references/workflow.md`, Architecture). Upload through `references/artifacts.md`. |
+| Show a visual change | Open the PR first, then load `references/visual-evidence.md` and capture live proof; the demo video goes in **What**. |
+| Show a data change | When someone who opens an artifact the code already writes or sends (session file, row, payload, log, command output) would find it shorter, moved, or reshaped: put a `show-me` artifact diff of one real sample in **What** (`references/workflow.md`, skim gate). Never for a new field or artifact, text the diff itself edits (prompt, tool description, golden), or data touched in passing. |
+| Refresh an existing PR | Load `references/refresh.md`; explicit title/body audits bypass the no-diff throttle. |
+| Publish or PATCH | Load `references/publish.md`; compose with a file tool and use GitHub REST. |
+
+Load this skill immediately before drafting, creating, or PATCHing the PR. Do not preload references; load each when its trigger fires.
+
+## Detect
+
+Use three-dot diff and two-dot log:
+
+```bash
+DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}')
+git fetch -q origin "$DEFAULT_BRANCH"
+git log  --oneline "origin/$DEFAULT_BRANCH"..HEAD
+git diff --stat    "origin/$DEFAULT_BRANCH"...HEAD
+```
+
+## Rules
+
+1. Never title the mechanism when the diff proves a higher-level behavior or
+   invariant, and never trade the change for its outcome: the title says what
+   the PR does, in the imperative, with the payoff as a `so` clause when it
+   is not obvious (`workflow.md`, Title).
+2. Never replace `What / Why / How` with a second description schema; strengthen
+   **What** with concrete impact and decisive evidence.
+3. Never let section order bury a merge-defining fact; preview it in
+   Description and keep methodology in its owning later section.
+4. Never turn the body into a diff summary or changelog; file tours belong in
+   Reviewer Guide/Implementation map, and patch history belongs only in the
+   lean refresh revision log.
+5. Never treat factual freshness as persuasive coherence; every explicit
+   title/body audit reruns the first-screen skim gate.
+6. Never fabricate magnitude, proof, mitigation, or rollout state. Preview
+   only evidence the diff or live verification actually supports.
+7. Never compose the body through shell heredocs or publish with `gh pr edit`;
+   use a file tool, run `scripts/finalize-body.py` (it appends the writing
+   session's `FACTORY_SESSION_ID` to the body's session list and stamps the
+   full HEAD sha, never the merge base), publish with `gh api -F body=@file`,
+   then verify the live body byte-for-byte.
+8. Never price a large diff in prose, estimates, or one added-plus-deleted
+   churn number; a reviewer prices the PR from the first screen, so the
+   script's tables (+ and − apart, core first, an action per row) go there,
+   before **Why**.
+9. Never attach durations to review passes or to the review; name the commits,
+   files, and the one thing to check per pass.
+10. Never open **What** with the most vivid instance when the diff installs a
+    rule across surfaces; the first sentence states the rule's before and
+    after, and the instance follows as its first consequence.
+11. Never restate the Before → After table in Risk & Impact or in a list of
+    removed safeguards; one owner per fact. The list keeps only what the
+    table cannot carry: member lists, deleted files and exports, dead
+    branches, and a Not-removed line.
+12. Never publish a body without at least one `show-me` view under
+    **Architecture**; "nothing to draw" is not an exit (`workflow.md`,
+    Architecture), and `scripts/finalize-body.py` refuses the body.
+
+## Failure map
+
+| Symptom | Action |
+|---|---|
+| Title is valid but says only how | Apply the abstraction ladder in `workflow.md`; choose the highest proven delta. |
+| Title states only the outcome and reads like a release note | Lead with the verb phrase the diff performs; keep the outcome as `so …` (`workflow.md`, Title). |
+| Title reads like compressed shorthand to fit a length or a scope list | Rewrite it as the sentence you would say to a teammate; drop plumbing-only scopes, never words (`workflow.md`, Title). |
+| Impact is vague despite strong evidence | Preview the decisive fact in **What**; keep full proof in its conditional section. |
+| Reviewer must scroll to know why to merge | Run the skim gate in `workflow.md` and rewrite the first screen. |
+| Diff is large and the body explains the size in prose, or the composition sits in Reviewer Guide | Run `scripts/diff-composition.py`; move the composition and core tables under **What** (`conditional-sections.md`, Diff composition). |
+| **What** opens with an example or consequence ("`JSON.parse` now works") instead of the rule | Rewrite the first sentence as the rule's before → after; the example becomes the second paragraph (`workflow.md`, skim gate). |
+| Many surfaces change and the reviewer must assemble the picture from prose | Add the Before → After table directly under **What** (`conditional-sections.md`). |
+| Risk & Impact or a removed-safeguards list restates the Before → After table | Cut it to what the table cannot carry (Rule 11). |
+| A reader asks what happened to their data and the body answers with a table or a flow | Add the artifact diff in **What** (Act, Show a data change). |
+| Composition table leads with its biggest bucket, or one churn number hides that most of the diff is deletion | Core logic first, + and − in separate columns (`conditional-sections.md`, Diff composition). |
+| Core breakdown is freeform bullets or one churn total per group | Rebuild it as the core table: New / Deleted / Swapped / Reshaped rows, per-file +/−, one thing to check (`conditional-sections.md`, Diff composition). |
+| A commit table lists test titles | Name the invariants each commit's tests pin, with the file (`workflow.md`, Reviewer Guide). |
+| Body cites SHAs after a rebase or force-push | Sweep with the stale-SHA step in `refresh.md`; rerun the composition script. |
+| Refresh says no-op but the user asked for prose/title improvement | Use the explicit-audit bypass in `refresh.md`. |
+| Repeated refreshes read like commit history | Replace the revision log with only changes since the last human review. |
+| Architecture reads like a changelog, or the diff seems to have nothing to draw | Name the reader's question per concern and draw that relation (`workflow.md`, Architecture). |
+| Recording adds no reviewer signal | Follow `visual-evidence.md`; remove net-zero evidence. |
+| Demo video sits under Visual Evidence, below the fold | Move it into **What**, right after the paragraph that states the change and its proof (`visual-evidence.md`, Placement). |
+| Architecture view is a Mermaid fence or ASCII diagram | Ship it as a polished uploaded image (`show-me` surfaces, Image). |
+| GitHub body differs after PATCH | Follow the byte-compare verification in `publish.md`. |
+
+## References
+
+Load on demand; do not reabsorb into this file:
+
+- `references/workflow.md` — diff analysis, title selection, first-screen gate,
+  required sections, writing, and searchable markers.
+- `references/conditional-sections.md` — optional section triggers, templates,
+  repro recipes, scope maps, lineage, and implementation appendices.
+- `references/artifacts.md` — artifact upload, placement, and capture captions.
+- `references/visual-evidence.md` — live visual proof decision tree and capture
+  handoff.
+- `references/refresh.md` — marker-based staleness, decision-hierarchy audit,
+  revision log, and explicit-audit bypass.
+- `references/publish.md` — GitHub REST operations, finalize, and round-trip
+  verification.
+- `references/replay.md` — replay scenarios, grading, and baseline for edits
+  to this skill.
+- `scripts/finalize-body.py` — refuses a body without an Architecture view,
+  then stamps the `pr-desc-sessions` and `pr-desc-base` markers.
+- `scripts/diff-composition.py` — buckets a three-dot diff by review weight
+  (core first, then tests / mechanical / generated / tooling / docs) from
+  `git numstat`, with + and − and whole-file adds/deletes kept apart.

@@ -1,0 +1,173 @@
+## Skill loading (phased)
+
+Load skills at the moment their work begins — not everything up front. Deferring a load to the phase that consumes it is correct; skipping the load is not. Beyond this list, load any other skill the moment the work matches its description, which is its trigger.
+
+**All work:**
+- **At start**: **worktree-setup**, **ast-grep**, **step-through**, **repo-conventions**.
+- **At start, when the work references externals** (a Linear ticket, Slack thread, Notion doc, ...): the matching CLI skill(s) — **linear-cli**, **slack-cli**, **notion-cli**, ...
+- **Once due diligence is done** (exploration complete, before designing or writing code): **single-canon**, **patch-coherence**, **quality-ship**, and read the crux lens (Step 3).
+
+**Bug fixes inherit the above, plus:**
+- **At start**: **root-cause-analysis**, **pr-context**, and read `~/.agents/skills/review-pr/references/lenses/structure.md` (the file only; don't load **review-pr**).
+- **Once initial exploration is done** (mid-flow, not at the very end): **droid-control** — drive the real app/TUI/browser to reproduce the failure and later verify the fix.
+
+**Features / enhancements inherit the above, plus:**
+- **Once initial exploration is done** (mid-flow, not at the very end): **droid-control** — exercise the flow being built against the running app.
+
+## Todo cadence (non-optional)
+
+At every `##` boundary:
+
+1. Mark the prior section `completed` (only after verification).
+2. Mark the incoming section `in_progress`.
+3. Append newly-discovered subtasks as todos immediately.
+
+After any approved spec or plan becomes ground truth (Phase 4 here, equivalents elsewhere):
+
+4. Rebuild the todo list against the spec -- one item per concrete deliverable (file edit, key decision, test, validator step). Structural placeholders give way to the atomic items they expand into.
+5. The **final todo** is always: *"Re-read the spec; repopulate todos for any remaining stage, or mark the implementation complete."* This recursion anchors against context drift on long runs and chains multi-stage specs naturally -- do not skip it because the bottom of the list "feels done".
+
+Fire `TodoWrite` in parallel with the first tool call of each phase.
+
+## 1. Understand the Work
+
+- If the text supplied after the slash command contains a ticket ID (e.g., `TEAM-123`), fetch it:
+  ```bash
+  linear i get <ID> --output json --comments
+  ```
+- If pasted content or a plain description is provided, parse it directly.
+- Identify: the problem statement, acceptance criteria, constraints, linked issues/PRs, and any discussion context.
+- When acceptance criteria or constraints aren't stated (untracked work), derive them from the request and the codebase -- they surface for confirmation in the step-4 spec, not as silent assumptions.
+- **Pull every referenced artifact** -- bug reports, Sentry, logs, attachments, linked PRs, design docs (see `linear-cli`'s **Attached Artifact Enrichment**). Read-only fetches don't violate spec mode.
+
+## 2. Explore Current Code
+
+- If you haven't mapped this area yet, load **zoom-out** first and build its module and caller map before reading individual files.
+- Use search tools (Grep, Glob, codebase_search) to find all relevant code areas.
+- Read the key files: entry points, data models, services, components, tests.
+- Map the current behavior and data flow in the area of change.
+- Identify existing patterns and abstractions to follow -- from the surrounding code **and** the repo's written standards (follow **repo-conventions**, steps 1-2): surface the docs governing this area so the spec conforms from the start, not retrofitted at the gate.
+- When the request names specific flows or commands to reuse, trace each one end-to-end and note exactly where the new feature's behavior diverges.
+- Note tests, types, configs, and documentation that will need updating.
+
+### Bug fixes: root-cause analysis before proposing a fix
+
+When the work describes a bug, apply the **root-cause-analysis** methodology before moving to Step 3:
+
+1. **Reproduce**: Identify or write a minimal repro (test case, script, or manual steps) that demonstrates the failure on the current base branch. If reproduction fails, revisit exploration -- a bug you can't trigger is a bug you don't yet understand. The repro is the oracle for every later step: make it deterministic and cheap.
+
+2. **Trace root cause**: Do not stop at the first error. Follow the root-cause-analysis workflow:
+   - State the expected behavior and invariant in plain language.
+   - Pick the opening move: narrow (bisect over history, input, layer, writers) when a known-good reference exists or you cannot name the call path in one sentence; read when the path fits in one head. Switch to narrowing the moment reading turns into guessing.
+   - Trace the causal chain from intended action to observed effect.
+   - Ask whether the request or mutation should have happened at all.
+   - Find the first unintended side effect -- that is the root cause, not the downstream error.
+   - Audit hidden writes: lifecycle hooks, subscribers, watchers, background jobs, persistence restore, cache refreshers.
+   - Prove the hypothesis against the repro: toggle the named cause off and on and confirm the oracle flips. A failed prediction is a new boundary; narrow again.
+
+3. **Step through** (when applicable): If the bug involves multi-actor sequencing, async callbacks, background refreshes, recovery paths, queues, retries, or state machines, apply the **step-through** skill: walk the broken flow with explicit state (`actor = {...}`) at every transition, taking each actor's perspective, until an invariant breaks. Do not skip to "walk the fix" -- step through the broken flow first.
+
+The fix approach in Step 3 should flow directly from the root-cause analysis: explain *what the first unintended side effect is*, *which part of the repro breaks*, and *why the proposed change stops it from breaking*.
+
+## 3. Think Through the Approach
+
+Build the approach with the crux lens (`~/.agents/skills/review-pr/references/lenses/crux.md`, the file only; don't load **review-pr**). Steps 1–2 above already supply its map and crux; run its steps 3–5, so every mechanism the spec adds traces to the pure core or a sourced layer.
+
+Do **not** take the easiest-but-ugly path. Evaluate the implementation against:
+
+- **Clean architecture**: Proper separation of concerns, single responsibility.
+- **Pattern consistency**: Matches how the rest of the codebase does similar things, and the conventions surfaced in Step 2 -- treat those docs as binding design constraints.
+- **Error handling**: Covers failure modes, provides useful error messages.
+- **Edge cases**: Boundary conditions, empty states, concurrent access.
+- **Testability**: Changes are easy to unit/integration test.
+- **Blast radius**: Minimize files changed; avoid unnecessary refactors.
+- **Composition over extraction**: Before introducing a new helper or wrapper, check whether the feature can be implemented by entering an existing flow at a different point. Routing through existing plumbing is the default; new plumbing is fine when the existing flow has side effects you don't want, or when direct composition would create worse coupling than a small new abstraction -- but the spec must say why.
+
+If there are multiple viable approaches, evaluate trade-offs explicitly.
+
+If the chosen approach spans more than two modules or actors, or changes control
+flow, state, ownership, or dependencies, load `show-me` after the analysis.
+Include one compact representation in the spec; it presents the chosen design
+and does not replace the files, decisions, risks, or alternatives.
+
+### Features: grill on open decisions before spec
+
+Before locking the spec, walk the design tree with the user. For each unresolved branch (state ownership, extend-vs-create, edge-case behavior, naming, ordering of dependent changes), ask **one question at a time as a regular prose response** -- *not* via AskUser. Pair the question with your recommended answer and, if there are clear forks, 1-3 primary alternatives. Resolve decisions in dependency order; earlier answers often collapse later branches, so batching defeats that.
+
+Why prose, not AskUser: AskUser boxes the context, question, and answer into a fixed structure. Grilling is a conversation -- the user may want to redirect, reframe the question, or take a tangent. Prose keeps the channel open; AskUser forces them to cancel the tool call to do any of that.
+
+If a question can be answered by exploring the codebase, do that instead of asking. Two failure modes to avoid symmetrically: stopping before design questions are resolved (they leak into Step 4's **Open questions** bullet, which should hold only empirical unknowns the user can't resolve from a chair -- not unmade design choices), *and* grilling on choices you can defend in the spec yourself (those belong in **Key decisions**, not in the user's inbox).
+
+## 4. Present Spec
+
+Present a structured implementation plan:
+
+- **Approach**: High-level strategy and rationale for the chosen path, with the crux lens's pure core and layer ledger.
+- **Files to modify/create**: List with a brief description of the changes per file.
+- **Key decisions**: Non-obvious choices and their reasoning.
+- **Risks**: Potential issues, migration concerns, or things to watch.
+- **Alternatives rejected**: At least one simpler approach (e.g., composing an existing flow directly) with a concrete reason it was insufficient.
+- **Open questions**: Anything ambiguous that needs user input.
+
+**Wait for user approval before writing any code.**
+
+Once approved, the spec is ground truth: apply cadence rules 4 & 5 before any 4b / 5 work -- the recursive anchor is non-negotiable.
+
+On spec approval, a paired `.agents/specs/<spec>.notes.md` is auto-scaffolded for spec-time-unknown decisions. Append to it in the same turn as each decision, deviation, tradeoff, surprise, or open decision — not later, not in batches. The file feeds the **Implementation Notes** section of the eventual PR body (see `pr-description` Section 5).
+
+## 4b. Coverage step (non-optional, bug fixes and features)
+
+After spec approval, before implementing the change, apply **consolidate-test-suites** to place the test, then write it. Only *what it proves* and *how you confirm it can fail* differ by type. When you are orchestrating, the durable test and implementation are the coding owner's work -- author neither; verify red/green (below) and record the evidence yourself.
+
+### Place the test
+
+Run the consolidate-test-suites decision: name the invariant (bug: the behavior that broke; feature: the acceptance criterion the work promises), pick the lowest owning layer (integration over unit when torn; never e2e to compensate), find the canonical suite (prefer an existing file over a new one).
+
+### Write the test
+
+- Exercise the **real user-facing flow** -- the behavior that broke (from the spec's root cause and fix path) or the flow the work promises (tied to acceptance criteria) -- not the surface symptom or a synthetic happy path.
+- Test **behavior, not implementation detail**, so it stays a durable guard.
+- If the contract must hold under stress (concurrency, replay, malformed input, scale), that is its **own case** -- write it separately (see consolidate-test-suites).
+
+### Confirm it can fail (red)
+
+A test that cannot fail proves nothing.
+- **Bug fix:** it must **fail on the unfixed code** for the bug's stated reason (not an import/compile error).
+- **Feature:** no pre-existing broken state, so invert the expectation or stub the new behavior once, see it go **red**, then restore.
+
+### After implementing
+
+Re-run; confirm it passes (**green**), then run consolidate-test-suites' duplicate cleanup.
+
+### When to skip (justified exception, not an easy out)
+
+Skip only when one holds: no harness exists for the owning layer; the change lives where tests can't reach (prod-only races, build-time); or a test would be **genuinely contrived** (an artificial scenario -- "slow" or "hard to set up" doesn't count). Then fall back to the narrowest alternative (next lower layer, or the step-2 repro), state which and why, and record it in the PR (bug: **Root Cause Analysis**; feature: **Verification -> Not tested**).
+
+## 5. Validate
+
+> **Todo anchor**: before entering, add one todo per validator (worktree pre-check, format, lint, knip, typecheck, tests) so none silently slips.
+
+After the draft implementation is complete and before running any validators:
+
+### 5a. Worktree pre-check (mandatory, runs first)
+
+**Re-load the worktree-setup skill** and check for worktree context:
+
+```bash
+MAIN_REPO=$(git worktree list | head -1 | awk '{print $1}')
+[ "$(git rev-parse --show-toplevel)" != "$MAIN_REPO" ] && echo "WORKTREE -- follow worktree-setup before validators"
+```
+
+If in a worktree (or the working directory path contains `worktree`), follow the skill to mirror `node_modules` / repoint workspace packages / symlink `.venv` **before** touching any lint, typecheck, knip, or test command. Validators run in a bare worktree will either fail with missing-module errors or quietly resolve to stale main-repo sources -- both waste a full cycle and leave a botched symlink state for `/open-pr` to clean up later.
+
+Do not treat this as optional. Running it here means `/open-pr` can trust the environment is already correct.
+
+### 5b. Quality-ship
+
+Once the environment is ready, **re-load the quality-ship skill** and strictly follow its guidance:
+
+- Detect and run **every** applicable validator (format, lint, knip, typecheck, tests).
+- Scope correctly in monorepos (turbo or per-package).
+- Fix all issues per quality-ship's coding-owner rule; re-run until clean.
+
+Do not skip this step or defer it to a follow-up command. The implementation is not done until validators pass.

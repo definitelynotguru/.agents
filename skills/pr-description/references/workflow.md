@@ -1,0 +1,309 @@
+# Analysis, title, and required body
+
+Use this workflow for every new or rewritten PR description. `What / Why / How`
+is the canonical Description grammar; later sections own detail, not the first
+mention of a fact that changes the merge decision.
+
+## Pre-flight
+
+Emit this checklist and tick it as you work:
+
+```text
+pr-description checklist:
+- [ ] Diff analyzed three-dot; what/type/scope/why extracted
+- [ ] Strongest evidence and material merge cost identified
+- [ ] Title: `type(scope): <verb> <change> [so <payoff>]` a teammate would say; true or false against the diff; within any repo-enforced limit
+- [ ] First screen passes the skim gate (five questions on a large diff)
+- [ ] Large diff? Composition table computed by scripts/diff-composition.py, placed under What
+- [ ] Rule across 3+ surfaces, or 3+ behaviors? First sentence states before → after; Before → After table under What
+- [ ] Six required sections present; conditional catalog walked row by row
+- [ ] Architecture: one or more show-me views, each answering its own question, accepted for GitHub
+- [ ] Concrete visual change? Demo video in What, stills under Visual Evidence (visual-evidence.md)
+- [ ] "Show a data change" fires (SKILL.md, Act)? Artifact diff in What
+- [ ] Verification outcome-first; CI compressed to one line
+- [ ] Body length scales with complexity, not effort
+- [ ] Body composed with a file tool, passed `scripts/finalize-body.py`, applied through REST (publish.md)
+- [ ] Refresh only: base resolved and markers re-stamped (refresh.md)
+```
+
+## Analyze the diff
+
+Run the entrypoint's Detect commands. Three-dot diffs match GitHub's Files
+changed tab from the merge base; two-dot logs select commits in HEAD but not
+base.
+
+- Extract **what** changed, **type**, **scope**, and **why**.
+- Identify the strongest evidence that the change works and any risk, migration,
+  compatibility consequence, or review cost that could change the merge
+  decision.
+
+## Title
+
+Format: `type(scope): <verb> <change> [so <payoff>]`. The verb phrase says what
+the PR does, in the imperative, the way you would tell a teammate: plain words,
+a complete phrase, and what it replaces when it replaces something. A reader of
+the PR list should know what changed without opening the PR.
+
+Pitch the change at the highest level the diff itself performs:
+
+1. observable behavior or capability
+2. safety, reliability, or architectural invariant
+3. implementation mechanism
+
+Use the mechanism only when it is the durable value of the PR. Add the user or
+operator payoff as a `so` clause when the change alone does not make it
+obvious. The payoff never replaces the change: an outcome-only title is a
+release note, not a commit subject. It drops the imperative, fits many
+different diffs, and gives the reviewer nothing to check against the Files tab.
+Outcome-first belongs to the body's first screen, not the title.
+
+Test: a reviewer holding only the title and the diff can mark the title true
+or false.
+
+Include a magnitude only when it is verified, representative, and materially
+distinguishes the change.
+
+Length follows clarity. Honor a limit only when the repository enforces one (CI
+title check, commitlint); never compress the description into a noun stack or
+shorthand to fit an assumed cap. Scopes are routing metadata: name the declared
+scopes where the new behavior lives, not every package that changed to follow
+it, and never shorten the description to make room for them. On squash-merge
+repositories, the title is the permanent commit subject, so it must read well
+in `git log`.
+
+| Flaw | Weak | Strong |
+|---|---|---|
+| Compressed | `feat(cli, daemon-core, common): cap daemon sessions with one limit` | `feat(cli, daemon-core): replace subagent limits with one per-daemon session limit` |
+| Outcome only | `fix(daemon-core, frontend, cli): renamed sessions keep their names across Droid clients` | `fix(daemon-core): sync every session rename to Cloud Sync so other clients show it` |
+| Mechanism only | `fix(daemon-core): call update-title after applyManualSessionTitle` | same as above |
+
+## First-screen skim gate
+
+Keep `What / Why / How`. Strengthen it with the best available evidence rather
+than replacing it with a second schema. These are the questions the Description
+answers, not mandatory headings.
+
+- **What**: observable outcome or capability delta. Make impact concrete.
+- **Why**: stakes or first unintended side effect.
+- **How**: new flow or invariant, not a file tour.
+
+If a fact from Verification, Performance Evidence, Contract Delta, Migration,
+or Risk materially changes the merge decision, preview it in the Description.
+The later section still owns methodology and detail.
+
+Read only the title and first screen. A reviewer must be able to answer:
+
+1. Why merge this?
+2. What changes?
+3. Why believe it works?
+4. What could it cost or break?
+5. On a large diff (roughly 1k+ lines or 20+ files): how much of this must I
+   actually read, and which files carry the behavior?
+
+Question 5 decides whether review starts at all. Answer it with the computed
+composition and core tables from `conditional-sections.md` directly under
+**What**, before **Why**. A reviewer who meets the size before the tables has
+already priced the PR as unreviewable.
+
+Use two to four short sentences plus one compact table or list when that scans
+faster. The opening stands alone without the ticket. A demo video, when the
+change has one, sits on its own line right after the **What** paragraph that
+states the change and its proof, before any table (`visual-evidence.md`,
+Placement). An artifact diff (`SKILL.md`, Show a data change) takes the same
+slot, after the video when both exist. For a large structural PR,
+the order is **What** (outcome + decisive number) → composition table → core
+table → **Why** → **How** → one-line **Net effect for users**.
+
+When the diff installs one rule across three or more surfaces, or changes three
+or more behaviors at once, the first sentence states the rule's before and
+after; the most vivid instance is its first consequence, never the opener. The
+order is **What** (the rule) → Before → After table, one row per surface
+(`conditional-sections.md`) → composition table (large diff) → core table
+→ **Why** → **How**. A reviewer who reads the instance first prices the PR as
+narrower than it is, then meets the rest as surprises.
+Link a design document here when it carries the rationale. Keep anti-goals,
+scope maps, detailed RCA, and file tours in their owning locations.
+Omit **Why** only when **What** already states the stakes. A bug or flake fix
+always does: what failed and for whom (the users, or the required check), how
+often (counts, rate, or the runs and PRs it hit, with links), and what it cost
+(blocked merges, reruns, user-visible errors). "No ticket; flake fix" is not a
+motivation.
+
+## Section catalog
+
+The six required sections always fire. Conditional sections are a menu, not a
+checklist. Omit headings whose trigger does not fire. The order below is render
+order, not evidence priority: decision-relevant facts are previewed in the
+Description.
+
+| # | Section | Fires when |
+|---|---|---|
+| 1 | Description | always; inline Before → After table (multi-surface), diff composition (large diff), anti-goals, scope map, design link, or RCA as needed |
+| 2 | Visual Evidence | concrete UI/TUI/CLI/rendered-media change; its demo video sits in **What** |
+| 3 | Repro Recipe | new feature or fixed bug with a manual surface |
+| 4 | Architecture | always; one `show-me` view per reader question |
+| 5 | Related Issue | always; add lineage/stack block when applicable |
+| 6 | Reviewer Guide | always |
+| 7 | Risk & Impact | always |
+| 8 | Contract Delta | DB/API/wire/shared type touched |
+| 9 | Migration & Rollout | flag, migration, environment, or breaking change |
+| 10 | Performance Evidence | performance-sensitive change |
+| 11 | Telemetry & Observability | metrics, logs, traces, alerts changed |
+| 12 | Reverse Dependencies | changed surface has more than three consumers |
+| 13 | Side Effects | acknowledged regression |
+| 14 | Verification | always |
+| 15 | Implementation map | large multi-subsystem diff, roughly 20+ files |
+| 16 | Changes since last review | active-review refresh |
+| 17 | Implementation Notes | matching `.agents/specs/*.notes.md` exists |
+
+Conditional templates live in `conditional-sections.md`.
+
+## Required sections
+
+```markdown
+## Description
+
+**What**
+
+<Observable outcome or capability delta. Preview decisive evidence here.>
+
+**Why**
+
+<Stakes or first unintended side effect.>
+
+**How**
+
+<New flow or invariant in one or two sentences.>
+
+## Architecture
+
+<label naming the reader's question>
+<show-me view; one block per question>
+
+## Related Issue
+
+Closes TEAM-123
+
+## Reviewer Guide
+
+**Diff shape:** <attention split in one line; on a large diff, point at the composition and core tables in Description rather than restating them>
+**Three passes:** <large diff only; each pass names the commits or files and the one thing to check; never estimate durations>
+**Review depth:** Skim | Standard | Deep — <one-line reason>
+**Read order:**
+1. `path/to/entry.ts`: <one clause>
+2. `path/to/next.ts`: <one clause>
+3. Tests: <invariant they pin>
+
+**Open for pushback:** <one live design call + code anchor; omit when none>
+
+## Risk & Impact
+
+<Specific risks and the concrete scenario in which each fires.>
+
+## Verification
+
+**Behavior verified @ `<sha>`:** <state → action → observation>
+**Regression coverage:** <owning suite + invariant + failure mode>
+**Not tested:** <real skips with one reason each; N/A only when true>
+**Standard validators:** <one compressed line; include triaged unrelated failures>
+```
+
+### Architecture
+
+Every body carries one or more `show-me` views here, so the reviewer holds the
+relation the diff changes before reading lines. Name the question the Files tab
+cannot answer, then load `show-me` with that question, the verified diff and
+source, the GitHub destination, and that the view is required. `show-me` picks
+the grammar and runs the acceptance and render checks. On GitHub every view,
+trees and pseudocode included, ships as one polished, dark-themed uploaded
+image whose alt text states its takeaway; only verbatim source the reader
+copies stays Markdown text (`show-me` surfaces, GitHub).
+
+| Change | Reader question for `show-me` |
+|---|---|
+| Bug fix | Which path produced the failure, and which edge does the fix change? |
+| Feature | What calls the new code, or how can its state change? |
+| Refactor | Where does each responsibility live now? |
+| Contract, schema | What shape do consumers see now? |
+| Config, flags, CI, dependency bump | What reads the changed key or version, and what does each reader do with it now? |
+| Docs, skills, policy | Which file owns each rule now, and who reads it? Without a Before → After table under **What**: what does each reader or surface do now? |
+| No behavior change (typo, comment, rename) | Where does the touched text or symbol sit, and what reads it? |
+
+- Independent concerns get one view each, labelled by the question it
+  answers. A one-line change gets a call tree placing it on its path, or
+  pseudocode of the enclosing decision with the changed branch marked, never
+  the hunk itself.
+- Each view answers its own question: never repeat the Before → After table
+  under **What**, the Repro Recipe, the RCA trace, or a hunk the Files tab
+  already shows. **How** names the invariant in a sentence; the view carries
+  the flow.
+- Upload any files `show-me` returns through `references/artifacts.md` in the
+  authorized publish step.
+- Bodies this skill writes require the section; an author's body in a
+  `review-pr` description audit does not, so its absence there is no finding.
+
+### Reviewer Guide
+
+Keep it scannable. Use one file or tight pair per numbered line and causal,
+not alphabetical, order. When the core table already names each file and what
+to check, list entry points only. Add deliberate behavior changes that could
+look like merge noise. Drop an empty pushback prompt.
+
+Size numbers appear only in the composition and core tables, computed by the
+script; a bare "80% is generated" in prose is a hand-wave, not a number. On a
+large diff the three passes give the reviewer a plan: the hot path first (by
+commit), the contracts second, the repeated pattern last with two owners read
+in full and the rest spot-checked.
+Never attach a duration to a pass or to the review; it reads as a promise the
+author cannot keep. Cite commits by ordinal and subject as well as SHA; a
+rebase invalidates every SHA in the body (`refresh.md`).
+
+When the body carries a commit table, its test column names the two to four
+invariants each commit's tests pin, with the file: a list of test titles sends
+the reviewer into the files to learn what is pinned. Keep red-first evidence as
+labels and failure counts, not prose.
+
+### Risk & Impact
+
+Name scenarios, not categories. "Low risk — isolated" is valid only when true.
+For higher risk, state how the diff contains it: tests, E2E matrix, no
+persistence/protocol change, or single-revert restorability. Never claim a
+flag, migration, or mitigation the diff does not contain. Put future rollout
+intent in Migration & Rollout and label it as a plan.
+
+### Verification
+
+Lead with observed behavior, not validator inventory. Tie evidence to listed
+risks. Use a before/after table for enumerable behavior and include unchanged
+rows that show preserved contracts; when the Description already carries the
+Before → After table, point at it and add only the `verified @` anchors. Pin
+behavior claims with `verified @`.
+
+Name the sentinel case that turns red on regression and why its layer owns the
+invariant. CI status does not belong here; compress format/lint/type/test status
+to one Standard validators line.
+
+## Length and writing
+
+Length scales with complexity, not effort. A small PR is roughly 150 words of
+prose; Architecture views do not count. A complex PR earns length through
+triggered conditional sections. If always-on prose exceeds roughly 450 words
+without conditional sections, trim the file tour and diff narration.
+
+Use plain language before symbols. Keep paragraphs under three sentences.
+Use formatting only to clarify real information. Do not invent decorative
+before/after claims, hide required context in `<details>`, or let prose terms
+collide with existing product surfaces.
+
+Present-tense, third-person voice: "This PR adds", not "I added". Date any
+first-person note.
+
+## Stable searchable markers
+
+| Marker | Use when |
+|---|---|
+| `Constraint from:` | external requirement, e.g. `Constraint from: FAC-123 ("must work offline")` |
+| `Decision-maker:` | named owner of a non-obvious call |
+| `As of:` | architecture-blame snapshot of the touched module |
+| `Sentinel test:` | canary that fails first, with path/line |
+| `verified @` | commit that anchors a behavior claim |

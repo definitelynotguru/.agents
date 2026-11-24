@@ -1,0 +1,32 @@
+# Personal state, private project memory, and session handoffs
+skills/recon/memory/
+skills/handoff/handoffs/
+skills/.tokenzero/
+skills/notify/webhook.url
+
+# External cloned repos & nested git directories
+skills/box/sandbox/
+cursor-plugins/
+
+# Factory-generated mission droids & local scratch
+.agents/
+droids/scrutiny-feature-reviewer.md
+droids/user-testing-flow-validator.md
+
+# Secrets, keys, and logs
+*.env
+.env*
+!.env.example
+*.key
+*.pem
+*.p12
+*.log
+logs/
+
+# Dependencies & caches
+**/node_modules/
+**/__pycache__/
+**/.ruff_cache/
+*.pyc
+*.pyo
+.DS_Store

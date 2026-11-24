@@ -1,0 +1,114 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/session_start/env_vars.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/session_start/instructions.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "Execute",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/pre_tool_use/tirith_guard.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        },
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/pre_tool_use/rtk_rewrite.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10,
+          "preserveRiskLevel": true
+        }
+      ]
+    },
+    {
+      "matcher": "Execute",
+      "commandRegex": "\\b(sleep|watch|gh\\s+(run|pr))\\b",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/pre_tool_use/wait_guard.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Create|Edit|ApplyPatch",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/pre_tool_use/protect_paths.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10,
+          "onFailure": "block"
+        }
+      ]
+    },
+    {
+      "matcher": "LS|Read|Grep|Glob|FetchUrl|WebSearch",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/pre_tool_use/policy.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "ExitSpecMode|ProposeMission",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/post_tool_use/instructions.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SubagentStop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/subagent_stop/log_errors.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/state_capture.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 \"$HOME/.agents/hooks/state_capture.py\" --config-file \"$HOME/.agents/configs/droid.toml\"",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}
